@@ -11,7 +11,9 @@ var hasSymbols = require('has-symbols')();
 var getIteratorMethod = require('../helpers/getIteratorMethod');
 var AdvanceStringIndex = require('./AdvanceStringIndex');
 var Call = require('./Call');
+var CreateAsyncFromSyncIterator = require('./CreateAsyncFromSyncIterator');
 var GetMethod = require('./GetMethod');
+var GetV = require('./GetV');
 var IsArray = require('./IsArray');
 var Type = require('./Type');
 
@@ -46,20 +48,47 @@ module.exports = function GetIterator(obj, hint, method) {
 			);
 		}
 	}
-	var iterator = Call(actualMethod, obj);
+	var method;
+	if (arguments.length < 3) {
+		if (hint === 'async') {
+			method = GetMethod(obj, Symbol.asyncIterator);
+			if (typeof method !== 'undefined') {
+				var syncMethod = getIteratorMethod(
+					{
+						AdvanceStringIndex: AdvanceStringIndex,
+						GetMethod: GetMethod,
+						IsArray: IsArray,
+						Type: Type
+					},
+					obj
+				);
+				var syncIteratorRecord = GetIterator(obj, 'sync', syncMethod);
+				return CreateAsyncFromSyncIterator(syncIteratorRecord);
+			}
+		} else {
+			method = getIteratorMethod(
+				{
+					AdvanceStringIndex: AdvanceStringIndex,
+					GetMethod: GetMethod,
+					IsArray: IsArray,
+					Type: Type
+				},
+				obj
+			);
+		}
+	}
+	var iterator = Call(method, obj);
 	if (Type(iterator) !== 'Object') {
 		throw new $TypeError('iterator must return an object');
 	}
 
-	return iterator;
-
-	// TODO: This should return an IteratorRecord
-	/*
 	var nextMethod = GetV(iterator, 'next');
-	return {
+
+	var iteratorRecord = {
 		'[[Iterator]]': iterator,
 		'[[NextMethod]]': nextMethod,
 		'[[Done]]': false
 	};
-	*/
+
+	return iteratorRecord;
 };

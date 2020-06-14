@@ -554,8 +554,6 @@
 2020/IsStringPrefix.js	spackled linguist-generated=true
 2020/IteratorClose.js	spackled linguist-generated=true
 2020/IteratorComplete.js	spackled linguist-generated=true
-2020/IteratorNext.js	spackled linguist-generated=true
-2020/IteratorStep.js	spackled linguist-generated=true
 2020/IteratorValue.js	spackled linguist-generated=true
 2020/MakeDate.js	spackled linguist-generated=true
 2020/MakeDay.js	spackled linguist-generated=true
