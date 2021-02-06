@@ -327,6 +327,7 @@
 2018/OrdinaryHasInstance.js	spackled linguist-generated=true
 2018/OrdinaryHasProperty.js	spackled linguist-generated=true
 2018/OrdinarySetPrototypeOf.js	spackled linguist-generated=true
+2018/RawBytesToNumber.js	spackled linguist-generated=true
 2018/RegExpCreate.js	spackled linguist-generated=true
 2018/RegExpExec.js	spackled linguist-generated=true
 2018/RequireObjectCoercible.js	spackled linguist-generated=true
@@ -452,6 +453,7 @@
 2019/OrdinaryHasProperty.js	spackled linguist-generated=true
 2019/OrdinarySetPrototypeOf.js	spackled linguist-generated=true
 2019/PromiseResolve.js	spackled linguist-generated=true
+2019/RawBytesToNumber.js	spackled linguist-generated=true
 2019/RegExpCreate.js	spackled linguist-generated=true
 2019/RegExpExec.js	spackled linguist-generated=true
 2019/RequireObjectCoercible.js	spackled linguist-generated=true

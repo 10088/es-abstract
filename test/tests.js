@@ -4550,6 +4550,42 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('RawBytesToNumber', function (t) {
+		forEach(v.nonStrings, function (nonString) {
+			t['throws'](
+				function () { ES.RawBytesToNumber(nonString, [], false); },
+				TypeError,
+				debug(nonString) + ' is not a String'
+			);
+		});
+
+		t['throws'](
+			function () { ES.RawBytesToNumber('', [], false); },
+			RangeError,
+			'an invalid TypedArray Element Type throws'
+		);
+
+		forEach(v.nonArrays, function (nonArray) {
+			t['throws'](
+				function () { ES.RawBytesToNumber('Int8', nonArray, false); },
+				TypeError,
+				debug(nonArray) + ' is not an Array'
+			);
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.RawBytesToNumber('Int8', [], nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		// TODO: RawBytesToNumber tests
+
+		t.end();
+	});
+
 	test('StringGetOwnProperty', function (t) {
 		forEach(v.nonStrings.concat(v.strings), function (nonBoxedString) {
 			t['throws'](
@@ -5217,6 +5253,7 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 		GetIterator: true,
 		NumberToString: true,
 		ObjectCreate: true,
+		RawBytesToNumber: true,
 		SameValueNonNumber: true,
 		ToInteger: true,
 		ToNumber: true,
