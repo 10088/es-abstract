@@ -8186,6 +8186,156 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 	});
 };
 
+var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
+	es2021(ES, ops, expectedMissing, assign({}, skips, {
+		'Abstract Equality Comparison': true,
+		'Abstract Relational Comparison': true,
+		'Strict Equality Comparison': true
+	}));
+
+	var test = makeTest(skips);
+
+	test('IsStrictlyEqual', function (t) {
+		t.test('same types use ===', function (st) {
+			forEach(v.primitives.concat(v.objects), function (value) {
+				st.equal(ES.IsStrictlyEqual(value, value), value === value, debug(value) + ' is strictly equal to itself');
+			});
+			st.end();
+		});
+
+		t.test('different types are not ===', function (st) {
+			var pairs = [
+				[null, undefined],
+				[3, '3'],
+				[true, '3'],
+				[true, 3],
+				[false, 0],
+				[false, '0'],
+				[3, [3]],
+				['3', [3]],
+				[true, [1]],
+				[false, [0]],
+				[String(v.coercibleObject), v.coercibleObject],
+				[Number(String(v.coercibleObject)), v.coercibleObject],
+				[Number(v.coercibleObject), v.coercibleObject],
+				[String(Number(v.coercibleObject)), v.coercibleObject]
+			];
+			forEach(pairs, function (pair) {
+				var a = pair[0];
+				var b = pair[1];
+				st.equal(ES.IsStrictlyEqual(a, b), a === b, debug(a) + ' === ' + debug(b));
+				st.equal(ES.IsStrictlyEqual(b, a), b === a, debug(b) + ' === ' + debug(a));
+			});
+			st.end();
+		});
+
+		t.end();
+	});
+
+	test('IsLooselyEqual', function (t) {
+		t.test('same types use ===', function (st) {
+			forEach(v.primitives.concat(v.objects), function (value) {
+				st.equal(ES.IsLooselyEqual(value, value), value === value, debug(value) + ' is abstractly equal to itself');
+			});
+			st.end();
+		});
+
+		t.test('different types coerce', function (st) {
+			var pairs = [
+				[null, undefined],
+				[3, '3'],
+				[true, '3'],
+				[true, 3],
+				[false, 0],
+				[false, '0'],
+				[3, [3]],
+				['3', [3]],
+				[true, [1]],
+				[false, [0]],
+				[String(v.coercibleObject), v.coercibleObject],
+				[Number(String(v.coercibleObject)), v.coercibleObject],
+				[Number(v.coercibleObject), v.coercibleObject],
+				[String(Number(v.coercibleObject)), v.coercibleObject]
+			];
+			forEach(pairs, function (pair) {
+				var a = pair[0];
+				var b = pair[1];
+				// eslint-disable-next-line eqeqeq
+				st.equal(ES.IsLooselyEqual(a, b), a == b, debug(a) + ' == ' + debug(b));
+				// eslint-disable-next-line eqeqeq
+				st.equal(ES.IsLooselyEqual(b, a), b == a, debug(b) + ' == ' + debug(a));
+			});
+			st.end();
+		});
+
+		t.end();
+	});
+
+	test('IsLessThan', function (t) {
+		t.test('at least one operand is NaN', function (st) {
+			st.equal(ES.IsLessThan(NaN, {}, true), undefined, 'LeftFirst: first is NaN, returns undefined');
+			st.equal(ES.IsLessThan({}, NaN, true), undefined, 'LeftFirst: second is NaN, returns undefined');
+			st.equal(ES.IsLessThan(NaN, {}, false), undefined, '!LeftFirst: first is NaN, returns undefined');
+			st.equal(ES.IsLessThan({}, NaN, false), undefined, '!LeftFirst: second is NaN, returns undefined');
+			st.end();
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.IsLessThan(3, 4, nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		forEach(v.zeroes, function (zero) {
+			t.equal(ES.IsLessThan(zero, 1, true), true, 'LeftFirst: ' + debug(zero) + ' is less than 1');
+			t.equal(ES.IsLessThan(zero, 1, false), true, '!LeftFirst: ' + debug(zero) + ' is less than 1');
+			t.equal(ES.IsLessThan(1, zero, true), false, 'LeftFirst: 1 is not less than ' + debug(zero));
+			t.equal(ES.IsLessThan(1, zero, false), false, '!LeftFirst: 1 is not less than ' + debug(zero));
+
+			t.equal(ES.IsLessThan(zero, zero, true), false, 'LeftFirst: ' + debug(zero) + ' is not less than ' + debug(zero));
+			t.equal(ES.IsLessThan(zero, zero, false), false, '!LeftFirst: ' + debug(zero) + ' is not less than ' + debug(zero));
+		});
+
+		t.equal(ES.IsLessThan(Infinity, -Infinity, true), false, 'LeftFirst: ∞ is not less than -∞');
+		t.equal(ES.IsLessThan(Infinity, -Infinity, false), false, '!LeftFirst: ∞ is not less than -∞');
+		t.equal(ES.IsLessThan(-Infinity, Infinity, true), true, 'LeftFirst: -∞ is less than ∞');
+		t.equal(ES.IsLessThan(-Infinity, Infinity, false), true, '!LeftFirst: -∞ is less than ∞');
+		t.equal(ES.IsLessThan(-Infinity, 0, true), true, 'LeftFirst: -∞ is less than +0');
+		t.equal(ES.IsLessThan(-Infinity, 0, false), true, '!LeftFirst: -∞ is less than +0');
+		t.equal(ES.IsLessThan(0, -Infinity, true), false, 'LeftFirst: +0 is not less than -∞');
+		t.equal(ES.IsLessThan(0, -Infinity, false), false, '!LeftFirst: +0 is not less than -∞');
+
+		t.equal(ES.IsLessThan(3, 4, true), true, 'LeftFirst: 3 is less than 4');
+		t.equal(ES.IsLessThan(4, 3, true), false, 'LeftFirst: 3 is not less than 4');
+		t.equal(ES.IsLessThan(3, 4, false), true, '!LeftFirst: 3 is less than 4');
+		t.equal(ES.IsLessThan(4, 3, false), false, '!LeftFirst: 3 is not less than 4');
+
+		t.equal(ES.IsLessThan('3', '4', true), true, 'LeftFirst: "3" is less than "4"');
+		t.equal(ES.IsLessThan('4', '3', true), false, 'LeftFirst: "3" is not less than "4"');
+		t.equal(ES.IsLessThan('3', '4', false), true, '!LeftFirst: "3" is less than "4"');
+		t.equal(ES.IsLessThan('4', '3', false), false, '!LeftFirst: "3" is not less than "4"');
+
+		t.equal(ES.IsLessThan('a', 'abc', true), true, 'LeftFirst: "a" is less than "abc"');
+		t.equal(ES.IsLessThan('abc', 'a', true), false, 'LeftFirst: "abc" is not less than "a"');
+		t.equal(ES.IsLessThan('a', 'abc', false), true, '!LeftFirst: "a" is less than "abc"');
+		t.equal(ES.IsLessThan('abc', 'a', false), false, '!LeftFirst: "abc" is not less than "a"');
+
+		t.equal(ES.IsLessThan(v.coercibleObject, 42, true), true, 'LeftFirst: coercible object is less than 42');
+		t.equal(ES.IsLessThan(42, v.coercibleObject, true), false, 'LeftFirst: 42 is not less than coercible object');
+		t.equal(ES.IsLessThan(v.coercibleObject, 42, false), true, '!LeftFirst: coercible object is less than 42');
+		t.equal(ES.IsLessThan(42, v.coercibleObject, false), false, '!LeftFirst: 42 is not less than coercible object');
+
+		t.equal(ES.IsLessThan(v.coercibleObject, '3', true), false, 'LeftFirst: coercible object is not less than "3"');
+		t.equal(ES.IsLessThan('3', v.coercibleObject, true), false, 'LeftFirst: "3" is not less than coercible object');
+		t.equal(ES.IsLessThan(v.coercibleObject, '3', false), false, '!LeftFirst: coercible object is not less than "3"');
+		t.equal(ES.IsLessThan('3', v.coercibleObject, false), false, '!LeftFirst: "3" is not less than coercible object');
+
+		t.end();
+	});
+};
+
 module.exports = {
 	es5: es5,
 	es2015: es2015,
@@ -8194,5 +8344,6 @@ module.exports = {
 	es2018: es2018,
 	es2019: es2019,
 	es2020: es2020,
-	es2021: es2021
+	es2021: es2021,
+	es2022: es2022
 };
