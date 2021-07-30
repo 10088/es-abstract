@@ -4581,6 +4581,45 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 			);
 		});
 
+		var int8bytes = [0, 0, 0, 65];
+		var int8output = 8;
+		t.equal(
+			ES.RawBytesToNumber('Int8', int8bytes, true),
+			int8output,
+			'Int8: bytes for 8: ' + debug(int8bytes) + ' produces ' + debug(int8output)
+		);
+
+		forEach(
+			[
+				['Int8', [8], 8], // new Int8Array(Object.assign(new Int8Array(1), { 0: 8 }).buffer)
+				['Uint8', [8], 8], // new Int8Array(Object.assign(new Uint8Array(1), { 0: 8 }).buffer)
+				['Uint8C', [8], 8], // new Int8Array(Object.assign(new Uint8ClampedArray(1), { 0: 8 }).buffer)
+				['Int16', [8, 0], 8], // new Int8Array(Object.assign(new Int16Array(1), { 0: 8 }).buffer)
+				['Uint16', [8, 0], 8], // new Int8Array(Object.assign(new Uint16Array(1), { 0: 8 }).buffer)
+				['Int32', [8, 0, 0, 0], 8], // new Int8Array(Object.assign(new Int32Array(1), { 0: 8 }).buffer)
+				['Uint32', [8, 0, 0, 0], 8], // new Int8Array(Object.assign(new Uint32Array(1), { 0: 8 }).buffer)
+				['Float32', [0, 0, 0, 65], 8], // new Int8Array(Object.assign(new Float32Array(1), { 0: 8 }).buffer)
+				['Float64', [0, 0, 0, 0, 0, 0, 32, 64], 8] // new Int8Array(Object.assign(new Float64Array(1), { 0: 8 }).buffer)
+			],
+			function (tuple) {
+				var type = tuple[0];
+				var bytes = tuple[1];
+				var reversedBytes = bytes.slice().reverse();
+				var output = tuple[2];
+
+				t.equal(
+					ES.RawBytesToNumber(type, bytes, true),
+					output,
+					type + ': bytes for ' + debug(output) + ', little endian: ' + debug(bytes) + ' produces ' + debug(output)
+				);
+				t.equal(
+					ES.RawBytesToNumber(type, reversedBytes, false),
+					output,
+					type + ': bytes for ' + debug(output) + ', big endian: ' + debug(reversedBytes) + ' produces ' + debug(output)
+				);
+			}
+		);
+
 		// TODO: RawBytesToNumber tests
 
 		t.end();
