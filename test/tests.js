@@ -2616,7 +2616,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			ES.IsCompatiblePropertyDescriptor(
 				true,
 				v.descriptors.configurable(),
-				v.descriptors.nonConfigurable()
+				ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable())
 			),
 			false
 		);
@@ -2624,7 +2624,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			ES.IsCompatiblePropertyDescriptor(
 				false,
 				v.descriptors.configurable(),
-				v.descriptors.nonConfigurable()
+				ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable())
 			),
 			false
 		);
@@ -2633,7 +2633,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			ES.IsCompatiblePropertyDescriptor(
 				true,
 				v.descriptors.nonConfigurable(),
-				v.descriptors.configurable()
+				ES.CompletePropertyDescriptor(v.descriptors.configurable())
 			),
 			true
 		);
@@ -2642,7 +2642,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			ES.IsCompatiblePropertyDescriptor(
 				false,
 				v.descriptors.nonConfigurable(),
-				v.descriptors.configurable()
+				ES.CompletePropertyDescriptor(v.descriptors.configurable())
 			),
 			true
 		);
@@ -4255,7 +4255,13 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 
 		forEach([v.dataDescriptor, v.accessorDescriptor, v.mutatorDescriptor], function (getDescriptor) {
 			t.equal(
-				ES.ValidateAndApplyPropertyDescriptor(undefined, 'property key', true, getDescriptor(), getDescriptor()),
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
+					getDescriptor(),
+					ES.CompletePropertyDescriptor(getDescriptor())
+				),
 				true,
 				'when Desc and current are the same, early return true'
 			);
@@ -4269,7 +4275,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.configurable(v.dataDescriptor()),
-					v.descriptors.nonConfigurable(v.dataDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.dataDescriptor()))
 				),
 				false,
 				'false if Desc is configurable'
@@ -4281,7 +4287,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.enumerable(v.dataDescriptor()),
-					v.descriptors.nonEnumerable(v.dataDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonEnumerable(v.dataDescriptor()))
 				),
 				false,
 				'false if Desc is Enumerable and current is not'
@@ -4293,7 +4299,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.nonEnumerable(v.dataDescriptor()),
-					v.descriptors.enumerable(v.dataDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.enumerable(v.dataDescriptor()))
 				),
 				false,
 				'false if Desc is not Enumerable and current is'
@@ -4307,7 +4313,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					descLackingEnumerable,
-					v.descriptors.enumerable(v.accessorDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.enumerable(v.accessorDescriptor()))
 				),
 				true,
 				'not false if Desc lacks Enumerable'
@@ -4324,7 +4330,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.configurable(v.accessorDescriptor()),
-					v.descriptors.nonConfigurable(v.dataDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.dataDescriptor()))
 				),
 				false,
 				'false if current (data) is nonconfigurable'
@@ -4336,7 +4342,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.configurable(v.dataDescriptor()),
-					v.descriptors.nonConfigurable(v.accessorDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.accessorDescriptor()))
 				),
 				false,
 				'false if current (not data) is nonconfigurable'
@@ -4355,7 +4361,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.enumerable(v.descriptors.configurable(v.accessorDescriptor())),
-					v.descriptors.enumerable(v.descriptors.configurable(v.dataDescriptor()))
+					ES.CompletePropertyDescriptor(v.descriptors.enumerable(v.descriptors.configurable(v.dataDescriptor())))
 				),
 				true,
 				'operation is successful: current is data, Desc is accessor'
@@ -4394,7 +4400,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.writable(v.dataDescriptor()),
-					v.descriptors.nonWritable(v.descriptors.nonConfigurable(v.dataDescriptor()))
+					ES.CompletePropertyDescriptor(v.descriptors.nonWritable(v.descriptors.nonConfigurable(v.dataDescriptor())))
 				),
 				false,
 				'false if frozen current and writable Desc'
@@ -4406,7 +4412,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.descriptors.configurable({ '[[Value]]': 42 }),
-					v.descriptors.nonWritable({ '[[Value]]': 7 })
+					ES.CompletePropertyDescriptor(v.descriptors.nonWritable({ '[[Value]]': 7 }))
 				),
 				false,
 				'false if nonwritable current has a different value than Desc'
@@ -4422,7 +4428,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.mutatorDescriptor(),
-					v.descriptors.nonConfigurable(v.mutatorDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.mutatorDescriptor()))
 				),
 				false,
 				'false if both Sets are not equal'
@@ -4434,7 +4440,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					'property key',
 					true,
 					v.accessorDescriptor(),
-					v.descriptors.nonConfigurable(v.accessorDescriptor())
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.accessorDescriptor()))
 				),
 				false,
 				'false if both Gets are not equal'

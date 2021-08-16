@@ -880,7 +880,6 @@
 2022/IsArray.js	spackled linguist-generated=true
 2022/IsBigIntElementType.js	spackled linguist-generated=true
 2022/IsCallable.js	spackled linguist-generated=true
-2022/IsCompatiblePropertyDescriptor.js	spackled linguist-generated=true
 2022/IsConcatSpreadable.js	spackled linguist-generated=true
 2022/IsConstructor.js	spackled linguist-generated=true
 2022/IsDataDescriptor.js	spackled linguist-generated=true
@@ -992,7 +991,6 @@
 2022/UTF16EncodeCodePoint.js	spackled linguist-generated=true
 2022/UTF16SurrogatePairToCodePoint.js	spackled linguist-generated=true
 2022/UnicodeEscape.js	spackled linguist-generated=true
-2022/ValidateAndApplyPropertyDescriptor.js	spackled linguist-generated=true
 2022/WeakRefDeref.js	spackled linguist-generated=true
 2022/WeekDay.js	spackled linguist-generated=true
 2022/YearFromTime.js	spackled linguist-generated=true
