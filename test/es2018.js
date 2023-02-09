@@ -24,7 +24,6 @@ var expectedMissing = [
 	'AsyncGeneratorResumeNext',
 	'AsyncGeneratorStart',
 	'AsyncGeneratorYield',
-	'AsyncIteratorClose',
 	'AtomicLoad',
 	'AtomicReadModifyWrite',
 	'Await', // macro
@@ -41,15 +40,14 @@ var expectedMissing = [
 	'Construct',
 	'CopyDataBlockBytes',
 	'CreateArrayFromList',
-	'CreateArrayIterator',
-	'CreateAsyncFromSyncIterator',
+	'CreateArrayIterator', // es-create-array-iterator package, but it has a Type dependence and a shared ArrayIteratorPrototype
 	'CreateBuiltinFunction',
 	'CreateByteDataBlock',
 	'CreateDynamicFunction',
 	'CreateIntrinsics',
-	'CreateListIteratorRecord',
+	'CreateListIteratorRecord', // only used in FunctionDeclarationInstantiation
 	'CreateMapIterator',
-	'CreateMappedArgumentsObject',
+	'CreateMappedArgumentsObject', // takes a Parse Node
 	'CreatePerIterationEnvironment',
 	'CreateRealm',
 	'CreateResolvingFunctions',
@@ -58,11 +56,10 @@ var expectedMissing = [
 	'CreateStringIterator',
 	'CreateUnmappedArgumentsObject',
 	'Decode',
-	'DetachArrayBuffer',
 	'Encode',
 	'EnqueueJob',
 	'EnterCriticalSection',
-	'EnumerateObjectProperties',
+	'EnumerateObjectProperties', // only used in for-in loops
 	'EscapeRegExpPattern',
 	'EvalDeclarationInstantiation',
 	'EvaluateCall',
@@ -86,7 +83,6 @@ var expectedMissing = [
 	'GetBase',
 	'GetFunctionRealm',
 	'GetGeneratorKind',
-	'GetGlobalObject',
 	'GetIdentifierReference',
 	'GetModifySetValueInBuffer',
 	'GetModuleNamespace',
@@ -104,11 +100,7 @@ var expectedMissing = [
 	'happens-before',
 	'HasPrimitiveBase',
 	'host-synchronizes-with',
-	'HostEnsureCanCompileStrings',
 	'HostEventSet',
-	'HostPromiseRejectionTracker',
-	'HostReportErrors',
-	'HostResolveImportedModule',
 	'IfAbruptRejectPromise',
 	'ImportedLocalNames',
 	'InitializeBoundName',
@@ -116,19 +108,18 @@ var expectedMissing = [
 	'InitializeReferencedBinding',
 	'InnerModuleEvaluation',
 	'InnerModuleInstantiation',
-	'IntegerIndexedElementGet',
-	'IntegerIndexedElementSet',
+	'IntegerIndexedElementGet', // depends on GetValueFromBuffer
+	'IntegerIndexedElementSet', // depends on SetValueInBuffer
 	'IntegerIndexedObjectCreate',
 	'InternalizeJSONProperty',
 	'IsAnonymousFunctionDefinition',
-	'IsDetachedBuffer',
 	'IsInTailPosition',
 	'IsLabelledFunction',
 	'IsPropertyReference',
 	'IsStrictReference',
 	'IsSuperReference',
 	'IsUnresolvableReference',
-	'IsWordChar',
+	'IsWordChar', // depends on WordCharacters
 	'LeaveCriticalSection',
 	'LocalTime',
 	'LoopContinues', // completion records
@@ -138,9 +129,7 @@ var expectedMissing = [
 	'MakeConstructor',
 	'MakeMethod',
 	'MakeSuperPropertyReference',
-	'max',
 	'memory-order',
-	'min',
 	'ModuleDeclarationEnvironmentSetup',
 	'ModuleExecution',
 	'ModuleNamespaceCreate',
@@ -150,8 +139,6 @@ var expectedMissing = [
 	'NewModuleEnvironment',
 	'NewObjectEnvironment',
 	'NewPromiseCapability',
-	'NormalCompletion', // completion records
-	'NumberToRawBytes',
 	'OrdinaryCallBindThis',
 	'OrdinaryCallEvaluateBody',
 	'OrdinaryDelete',
@@ -173,10 +160,9 @@ var expectedMissing = [
 	'PromiseResolveThenableJob',
 	'ProxyCreate',
 	'PutValue', // takes a Reference
-	'RawBytesToNumber',
 	'reads-bytes-from',
 	'reads-from',
-	'RegExpAlloc', // creates a regex with uninitialized internal lots
+	'RegExpAlloc', // creates a regex with uninitialized internal slots
 	'RegExpBuiltinExec',
 	'RegExpInitialize', // initializes allocated regex's internal slots
 	'RejectPromise',
@@ -201,7 +187,6 @@ var expectedMissing = [
 	'SortCompare', // mystery access to `comparefn` arg
 	'Suspend',
 	'synchronizes-with',
-	'ThrowCompletion',
 	'TimeZoneString', // depends on LocalTZA
 	'TopLevelModuleEvaluationJob',
 	'TriggerPromiseReactions',
@@ -211,9 +196,7 @@ var expectedMissing = [
 	'UnicodeMatchPropertyValue',
 	'UpdateEmpty', // completion records
 	'UTC', // depends on LocalTZA
-	'ValidateAtomicAccess',
 	'ValidateSharedIntegerTypedArray',
-	'ValidateTypedArray',
 	'ValueOfReadEvent',
 	'WakeWaiter',
 	'WordCharacters' // depends on Canonicalize

@@ -17,21 +17,20 @@ var expectedMissing = [
 	'Construct',
 	'CopyDataBlockBytes',
 	'CreateArrayFromList',
-	'CreateArrayIterator',
+	'CreateArrayIterator', // es-create-array-iterator package, but it has a Type dependence and a shared ArrayIteratorPrototype
 	'CreateBuiltinFunction',
 	'CreateByteDataBlock',
 	'CreateDynamicFunction',
 	'CreateIntrinsics',
-	'CreateListIterator',
+	'CreateListIterator', // only used in FunctionDeclarationInstantiation
 	'CreateMapIterator',
-	'CreateMappedArgumentsObject',
+	'CreateMappedArgumentsObject', // takes a Parse Node
 	'CreatePerIterationEnvironment',
 	'CreateRealm',
 	'CreateSetIterator',
 	'CreateUnmappedArgumentsObject',
 	'DaylightSavingTA',
 	'Decode',
-	'DetachArrayBuffer',
 	'Encode',
 	'EnqueueJob',
 	'EscapeRegExpPattern',
@@ -54,7 +53,6 @@ var expectedMissing = [
 	'GeneratorYield',
 	'GetBase',
 	'GetFunctionRealm',
-	'GetGlobalObject',
 	'GetIdentifierReference',
 	'GetModuleNamespace',
 	'GetNewTarget',
@@ -67,23 +65,21 @@ var expectedMissing = [
 	'GetValueFromBuffer',
 	'GetViewValue',
 	'HasPrimitiveBase',
-	'HostResolveImportedModule',
 	'ImportedLocalNames',
 	'InitializeHostDefinedRealm',
 	'InitializeReferencedBinding',
-	'IntegerIndexedElementGet',
-	'IntegerIndexedElementSet',
+	'IntegerIndexedElementGet', // depends on GetValueFromBuffer
+	'IntegerIndexedElementSet', // depends on SetValueInBuffer
 	'IntegerIndexedObjectCreate',
 	'InternalizeJSONProperty',
 	'IsAnonymousFunctionDefinition',
-	'IsDetachedBuffer',
 	'IsInTailPosition',
 	'IsLabelledFunction',
 	'IsPropertyReference',
 	'IsStrictReference',
 	'IsSuperReference',
 	'IsUnresolvableReference',
-	'IsWordChar',
+	'IsWordChar', // depends on WordCharacters
 	'LocalTime',
 	'LoopContinues', // completion records
 	'MakeArgGetter',
@@ -92,8 +88,6 @@ var expectedMissing = [
 	'MakeConstructor',
 	'MakeMethod',
 	'MakeSuperPropertyReference',
-	'max',
-	'min',
 	'ModuleNamespaceCreate',
 	'msPerDay', // constant
 	'NewDeclarativeEnvironment',
@@ -102,7 +96,6 @@ var expectedMissing = [
 	'NewModuleEnvironment',
 	'NewObjectEnvironment',
 	'NewPromiseCapability',
-	'NormalCompletion', // completion records
 	'OrdinaryCallBindThis',
 	'OrdinaryCallEvaluateBody',
 	'ParseModule',
@@ -114,7 +107,7 @@ var expectedMissing = [
 	'PrepareForTailCall',
 	'ProxyCreate',
 	'PutValue', // takes a Reference
-	'RegExpAlloc', // creates a regex with uninitialized internal lots
+	'RegExpAlloc', // creates a regex with uninitialized internal slots
 	'RegExpBuiltinExec',
 	'RegExpInitialize', // initializes allocated regex's internal slots
 	'RejectPromise',
@@ -128,7 +121,7 @@ var expectedMissing = [
 	'SetRealmGlobalObject',
 	'SetValueInBuffer',
 	'SetViewValue',
-	'sign',
+	'sign', // used in ES5, but not in ES2015, removed in ES2016
 	'SortCompare', // mystery access to `comparefn` arg
 	'TriggerPromiseReactions',
 	'TypedArrayFrom',

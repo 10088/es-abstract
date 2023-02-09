@@ -30,14 +30,14 @@ var expectedMissing = [
 	'Construct',
 	'CopyDataBlockBytes',
 	'CreateArrayFromList',
-	'CreateArrayIterator',
+	'CreateArrayIterator', // es-create-array-iterator package, but it has a Type dependence and a shared ArrayIteratorPrototype
 	'CreateBuiltinFunction',
 	'CreateByteDataBlock',
 	'CreateDynamicFunction',
 	'CreateIntrinsics',
-	'CreateListIterator',
+	'CreateListIterator', // only used in FunctionDeclarationInstantiation
 	'CreateMapIterator',
-	'CreateMappedArgumentsObject',
+	'CreateMappedArgumentsObject', // takes a Parse Node
 	'CreatePerIterationEnvironment',
 	'CreateRealm',
 	'CreateResolvingFunctions',
@@ -47,11 +47,10 @@ var expectedMissing = [
 	'CreateUnmappedArgumentsObject',
 	'DaylightSavingTA',
 	'Decode',
-	'DetachArrayBuffer',
 	'Encode',
 	'EnqueueJob',
 	'EnterCriticalSection',
-	'EnumerateObjectProperties',
+	'EnumerateObjectProperties', // only used in for-in loops
 	'EscapeRegExpPattern',
 	'EvalDeclarationInstantiation',
 	'EvaluateCall',
@@ -75,7 +74,6 @@ var expectedMissing = [
 	'GetActiveScriptOrModule',
 	'GetBase',
 	'GetFunctionRealm',
-	'GetGlobalObject',
 	'GetIdentifierReference',
 	'GetModifySetValueInBuffer',
 	'GetModuleNamespace',
@@ -93,29 +91,24 @@ var expectedMissing = [
 	'happens-before',
 	'HasPrimitiveBase',
 	'host-synchronizes-with',
-	'HostEnsureCanCompileStrings',
 	'HostEventSet',
-	'HostPromiseRejectionTracker',
-	'HostReportErrors',
-	'HostResolveImportedModule',
 	'IfAbruptRejectPromise',
 	'ImportedLocalNames',
 	'InitializeBoundName',
 	'InitializeHostDefinedRealm',
 	'InitializeReferencedBinding',
-	'IntegerIndexedElementGet',
-	'IntegerIndexedElementSet',
+	'IntegerIndexedElementGet', // depends on GetValueFromBuffer
+	'IntegerIndexedElementSet', // depends on SetValueInBuffer
 	'IntegerIndexedObjectCreate',
 	'InternalizeJSONProperty',
 	'IsAnonymousFunctionDefinition',
-	'IsDetachedBuffer',
 	'IsInTailPosition',
 	'IsLabelledFunction',
 	'IsPropertyReference',
 	'IsStrictReference',
 	'IsSuperReference',
 	'IsUnresolvableReference',
-	'IsWordChar',
+	'IsWordChar', // depends on WordCharacters
 	'LeaveCriticalSection',
 	'LocalTime',
 	'LoopContinues', // completion records
@@ -125,9 +118,7 @@ var expectedMissing = [
 	'MakeConstructor',
 	'MakeMethod',
 	'MakeSuperPropertyReference',
-	'max',
 	'memory-order',
-	'min',
 	'ModuleNamespaceCreate',
 	'NewDeclarativeEnvironment',
 	'NewFunctionEnvironment',
@@ -135,8 +126,6 @@ var expectedMissing = [
 	'NewModuleEnvironment',
 	'NewObjectEnvironment',
 	'NewPromiseCapability',
-	'NormalCompletion', // completion records
-	'NumberToRawBytes',
 	'OrdinaryCallBindThis',
 	'OrdinaryCallEvaluateBody',
 	'OrdinaryDelete',
@@ -157,10 +146,9 @@ var expectedMissing = [
 	'PromiseResolveThenableJob',
 	'ProxyCreate',
 	'PutValue', // takes a Reference
-	'RawBytesToNumber',
 	'reads-bytes-from',
 	'reads-from',
-	'RegExpAlloc', // creates a regex with uninitialized internal lots
+	'RegExpAlloc', // creates a regex with uninitialized internal slots
 	'RegExpBuiltinExec',
 	'RegExpInitialize', // initializes allocated regex's internal slots
 	'RejectPromise',
@@ -191,9 +179,7 @@ var expectedMissing = [
 	'TypedArraySpeciesCreate',
 	'UpdateEmpty', // completion records
 	'UTC', // depends on LocalTZA, DaylightSavingTA
-	'ValidateAtomicAccess',
 	'ValidateSharedIntegerTypedArray',
-	'ValidateTypedArray',
 	'ValueOfReadEvent',
 	'WakeWaiter',
 	'WordCharacters', // depends on Canonicalize

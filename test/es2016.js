@@ -20,14 +20,14 @@ var expectedMissing = [
 	'Construct',
 	'CopyDataBlockBytes',
 	'CreateArrayFromList',
-	'CreateArrayIterator',
+	'CreateArrayIterator', // es-create-array-iterator package, but it has a Type dependence and a shared ArrayIteratorPrototype
 	'CreateBuiltinFunction',
 	'CreateByteDataBlock',
 	'CreateDynamicFunction',
 	'CreateIntrinsics',
-	'CreateListIterator',
+	'CreateListIterator', // only used in FunctionDeclarationInstantiation
 	'CreateMapIterator',
-	'CreateMappedArgumentsObject',
+	'CreateMappedArgumentsObject', // takes a Parse Node
 	'CreatePerIterationEnvironment',
 	'CreateRealm',
 	'CreateResolvingFunctions',
@@ -36,10 +36,9 @@ var expectedMissing = [
 	'CreateUnmappedArgumentsObject',
 	'DaylightSavingTA',
 	'Decode',
-	'DetachArrayBuffer',
 	'Encode',
 	'EnqueueJob',
-	'EnumerateObjectProperties',
+	'EnumerateObjectProperties', // only used in for-in loops
 	'EscapeRegExpPattern',
 	'EvalDeclarationInstantiation',
 	'EvaluateCall',
@@ -61,7 +60,6 @@ var expectedMissing = [
 	'GeneratorYield',
 	'GetActiveScriptOrModule',
 	'GetFunctionRealm',
-	'GetGlobalObject',
 	'GetIdentifierReference',
 	'GetModuleNamespace',
 	'GetNewTarget',
@@ -73,23 +71,19 @@ var expectedMissing = [
 	'GetValueFromBuffer',
 	'GetViewValue',
 	'GlobalDeclarationInstantiation',
-	'HostPromiseRejectionTracker',
-	'HostReportErrors',
-	'HostResolveImportedModule',
 	'IfAbruptRejectPromise',
 	'ImportedLocalNames',
 	'InitializeBoundName',
 	'InitializeHostDefinedRealm',
 	'InitializeReferencedBinding',
-	'IntegerIndexedElementGet',
-	'IntegerIndexedElementSet',
+	'IntegerIndexedElementGet', // depends on GetValueFromBuffer
+	'IntegerIndexedElementSet', // depends on SetValueInBuffer
 	'IntegerIndexedObjectCreate',
 	'InternalizeJSONProperty',
 	'IsAnonymousFunctionDefinition',
-	'IsDetachedBuffer',
 	'IsInTailPosition',
 	'IsLabelledFunction',
-	'IsWordChar',
+	'IsWordChar', // depends on WordCharacters
 	'LocalTime',
 	'LoopContinues', // completion records
 	'MakeArgGetter',
@@ -98,8 +92,6 @@ var expectedMissing = [
 	'MakeConstructor',
 	'MakeMethod',
 	'MakeSuperPropertyReference',
-	'max',
-	'min',
 	'ModuleNamespaceCreate',
 	'NewDeclarativeEnvironment',
 	'NewFunctionEnvironment',
@@ -108,7 +100,6 @@ var expectedMissing = [
 	'NewObjectEnvironment',
 	'NewPromiseCapability',
 	'NextJob',
-	'NormalCompletion', // completion records
 	'OrdinaryCallBindThis',
 	'OrdinaryCallEvaluateBody',
 	'OrdinaryDelete',
@@ -129,7 +120,7 @@ var expectedMissing = [
 	'PromiseResolveThenableJob',
 	'ProxyCreate',
 	'PutValue', // takes a Reference
-	'RegExpAlloc', // creates a regex with uninitialized internal lots
+	'RegExpAlloc', // creates a regex with uninitialized internal slots
 	'RegExpBuiltinExec',
 	'RegExpInitialize', // initializes allocated regex's internal slots
 	'RejectPromise',
@@ -153,8 +144,7 @@ var expectedMissing = [
 	'TypedArrayCreate',
 	'TypedArraySpeciesCreate',
 	'UpdateEmpty', // completion records
-	'UTC', // depends on LocalTZA, DaylightSavingTA
-	'ValidateTypedArray'
+	'UTC' // depends on LocalTZA, DaylightSavingTA
 ];
 
 require('./tests').es2016(boundES, ops, expectedMissing);

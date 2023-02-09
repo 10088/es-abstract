@@ -4,12 +4,13 @@ var GetIntrinsic = require('get-intrinsic');
 
 var $Function = GetIntrinsic('%Function%');
 var $TypeError = GetIntrinsic('%TypeError%');
+var $SyntaxError = GetIntrinsic('%SyntaxError%');
 
 var Get = require('./Get');
 var IsConstructor = require('./IsConstructor');
 var Type = require('./Type');
 
-// https://ecma-international.org/ecma-262/6.0/#sec-getprototypefromconstructor
+// https://262.ecma-international.org/6.0/#sec-getprototypefromconstructor
 
 module.exports = function GetPrototypeFromConstructor(constructor, intrinsicDefaultProto) {
 	var intrinsic = GetIntrinsic(intrinsicDefaultProto); // throws if not a valid intrinsic
@@ -20,7 +21,7 @@ module.exports = function GetPrototypeFromConstructor(constructor, intrinsicDefa
 	if (Type(proto) !== 'Object') {
 		if (!(constructor instanceof $Function)) {
 			// ignore other realms, for now
-			throw new $TypeError('cross-realm constructors not currently supported');
+			throw new $SyntaxError('cross-realm constructors not currently supported');
 		}
 		proto = intrinsic;
 	}

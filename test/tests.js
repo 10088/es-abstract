@@ -1,6 +1,7 @@
 'use strict';
 
 var tape = require('tape');
+var Test = require('tape/lib/test');
 
 var forEach = require('for-each');
 var debug = require('object-inspect');
@@ -14,23 +15,35 @@ var functionsHaveNames = require('functions-have-names')();
 var functionsHaveConfigurableNames = require('functions-have-names').functionsHaveConfigurableNames();
 var boundFunctionsHaveNames = require('functions-have-names').boundFunctionsHaveNames();
 var hasBigInts = require('has-bigints')();
+var getOwnPropertyDescriptor = require('gopd');
+var SLOT = require('internal-slot');
+var availableTypedArrays = require('available-typed-arrays')();
+var arrayFrom = require('array.from');
+var isCore = require('is-core-module');
+var isRegex = require('is-regex');
+var v = require('es-value-fixtures');
 
 var $getProto = require('../helpers/getProto');
 var $setProto = require('../helpers/setProto');
 var defineProperty = require('./helpers/defineProperty');
 var getInferredName = require('../helpers/getInferredName');
+var reduce = require('../helpers/reduce');
 var fromPropertyDescriptor = require('../helpers/fromPropertyDescriptor');
-var getOwnPropertyDescriptor = require('../helpers/getOwnPropertyDescriptor');
 var assertRecordTests = require('./helpers/assertRecord');
-var v = require('es-value-fixtures');
 var diffOps = require('./diffOps');
 
 var MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER || Math.pow(2, 53) - 1;
+var MAX_VALUE = Number.MAX_VALUE || 1.7976931348623157e+308;
 
 var $BigInt = hasBigInts ? BigInt : null;
 
 var supportedRegexFlags = require('available-regexp-flags');
-var thisTimeValue = require('../2015/thisTimeValue');
+
+/* globals postMessage */
+var canDetach = typeof structuredClone === 'function' || typeof postMessage === 'function' || isCore('worker_threads');
+
+// in node < 6, RegExp.prototype is an actual regex
+var reProtoIsRegex = isRegex(RegExp.prototype);
 
 // node v10.4-v10.8 have a bug where you can't `BigInt(x)` anything larger than MAX_SAFE_INTEGER
 var needsBigIntHack = false;
@@ -113,6 +126,15 @@ var makeTest = function makeTest(ES, skips) {
 	};
 };
 
+Test.prototype.throwsSentinel = function throwsSentinel(fn, sentinel, message) {
+	try {
+		fn();
+		this.fail('did not throw: ' + message);
+	} catch (e) {
+		this.equal(e, sentinel, message);
+	}
+};
+
 var leadingPoo = '\uD83D';
 var trailingPoo = '\uDCA9';
 var wholePoo = leadingPoo + trailingPoo;
@@ -141,6 +163,23 @@ var testIterator = function (t, iterator, expected) {
 	t.equal(resultCount, expected.length, 'expected ' + expected.length + ', got ' + (result.done ? '' : 'more than ') + resultCount);
 };
 
+var testAsyncIterator = function (t, asyncIterator, expected) {
+	var results = arguments.length > 3 ? arguments[3] : [];
+
+	var nextResult = asyncIterator.next();
+
+	return Promise.resolve(nextResult).then(function (result) {
+		results.push(result);
+		if (!result.done && results.length < expected.length) {
+			t.deepEqual(result, { done: false, value: expected[results.length - 1] }, 'result ' + (results.length - 1));
+			return testAsyncIterator(t, asyncIterator, expected, results);
+		}
+
+		t.equal(results.length, expected.length, 'expected ' + expected.length + ', got ' + (result.done ? '' : 'more than ') + results.length);
+		return results.length;
+	});
+};
+
 // eslint-disable-next-line max-params
 var testRESIterator = function testRegExpStringIterator(ES, t, regex, str, global, unicode, expected) {
 	var iterator = ES.CreateRegExpStringIterator(regex, str, global, unicode);
@@ -153,6 +192,14 @@ var testRESIterator = function testRegExpStringIterator(ES, t, regex, str, globa
 	});
 
 	testIterator(t, iterator, expected);
+};
+
+var makeIteratorRecord = function makeIteratorRecord(iterator) {
+	return {
+		'[[Iterator]]': iterator,
+		'[[NextMethod]]': iterator.next,
+		'[[Done]]': false
+	};
 };
 
 var hasSpecies = v.hasSymbols && Symbol.species;
@@ -326,13 +373,46 @@ var es5 = function ES5(ES, ops, expectedMissing, skips) {
 	var test = makeTest(ES, skips);
 
 	test('has expected operations', function (t) {
-		var diff = diffOps(ES, ops, expectedMissing);
+		var diff = diffOps(ES, ops, expectedMissing, []);
 
 		t.deepEqual(diff.extra, [], 'no extra ops');
 
 		t.deepEqual(diff.missing, [], 'no unexpected missing ops');
 
 		t.deepEqual(diff.extraMissing, [], 'no unexpected "expected missing" ops');
+
+		t.end();
+	});
+
+	test('IsPropertyDescriptor', function (t) {
+		forEach(v.primitives, function (primitive) {
+			t.equal(
+				ES.IsPropertyDescriptor(primitive),
+				false,
+				debug(primitive) + ' is not a Property Descriptor'
+			);
+		});
+
+		t.equal(ES.IsPropertyDescriptor({ invalid: true }), false, 'invalid keys not allowed on a Property Descriptor');
+
+		t.equal(ES.IsPropertyDescriptor({}), true, 'empty object is an incomplete Property Descriptor');
+
+		t.equal(ES.IsPropertyDescriptor(v.accessorDescriptor()), true, 'accessor descriptor is a Property Descriptor');
+		t.equal(ES.IsPropertyDescriptor(v.mutatorDescriptor()), true, 'mutator descriptor is a Property Descriptor');
+		t.equal(ES.IsPropertyDescriptor(v.dataDescriptor()), true, 'data descriptor is a Property Descriptor');
+		t.equal(ES.IsPropertyDescriptor(v.genericDescriptor()), true, 'generic descriptor is a Property Descriptor');
+
+		t['throws'](
+			function () { ES.IsPropertyDescriptor(v.bothDescriptor()); },
+			TypeError,
+			'a Property Descriptor can not be both a Data and an Accessor Descriptor'
+		);
+
+		t['throws'](
+			function () { ES.IsPropertyDescriptor(v.bothDescriptorWritable()); },
+			TypeError,
+			'a Property Descriptor can not be both a Data and an Accessor Descriptor'
+		);
 
 		t.end();
 	});
@@ -828,7 +908,8 @@ var es5 = function ES5(ES, ops, expectedMissing, skips) {
 				[String(v.coercibleObject), v.coercibleObject],
 				[Number(String(v.coercibleObject)), v.coercibleObject],
 				[Number(v.coercibleObject), v.coercibleObject],
-				[String(Number(v.coercibleObject)), v.coercibleObject]
+				[String(Number(v.coercibleObject)), v.coercibleObject],
+				[null, {}]
 			];
 			forEach(pairs, function (pair) {
 				var a = pair[0];
@@ -1143,11 +1224,13 @@ var es5 = function ES5(ES, ops, expectedMissing, skips) {
 	});
 
 	test('MakeDay', function (t) {
-		forEach([NaN, Infinity, -Infinity], function (nonFiniteNumber) {
+		forEach([NaN, Infinity, -Infinity, MAX_VALUE], function (nonFiniteNumber) {
 			t.equal(ES.MakeDay(nonFiniteNumber, 0, 0), NaN, 'year: ' + debug(nonFiniteNumber) + ' is not finite');
 			t.equal(ES.MakeDay(0, nonFiniteNumber, 0), NaN, 'month: ' + debug(nonFiniteNumber) + ' is not finite');
 			t.equal(ES.MakeDay(0, 0, nonFiniteNumber), NaN, 'date: ' + debug(nonFiniteNumber) + ' is not finite');
 		});
+
+		t.equal(ES.MakeDay(MAX_VALUE, MAX_VALUE, 0), NaN, 'year: ' + debug(MAX_VALUE) + ' combined with month: ' + debug(MAX_VALUE) + ' is too large');
 
 		var day2015 = 16687;
 		t.equal(ES.MakeDay(2015, 8, 9), day2015, '2015.09.09 is day 16687');
@@ -1217,6 +1300,15 @@ var es5 = function ES5(ES, ops, expectedMissing, skips) {
 		t.equal(ES.modulo(-3, 2), 1, '-3 mod 2 is +1');
 		t.end();
 	});
+
+	test('floor', function (t) {
+		t.equal(ES.floor(3.2), 3, 'floor(3.2) is 3');
+		t.equal(ES.floor(-3.2), -4, 'floor(-3.2) is -4');
+		t.equal(ES.floor(0), 0, 'floor(+0) is +0');
+		t.equal(ES.floor(-0), -0, 'floor(-0) is -0');
+
+		t.end();
+	});
 };
 
 var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
@@ -1236,6 +1328,40 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		} catch (e) { /**/ }
 		return f;
 	};
+
+	test('Abstract Equality Comparison', { skip: !v.hasSymbols }, function (t) {
+		t.equal(
+			ES['Abstract Equality Comparison'](Symbol(), Symbol()),
+			false,
+			'Abstract Equality Comparison with two distinct Symbols with no description returns false'
+		);
+
+		t.equal(
+			ES['Abstract Equality Comparison'](Symbol('x'), Symbol('x')),
+			false,
+			'Abstract Equality Comparison with two distinct Symbols with the same description returns false'
+		);
+
+		t.equal(
+			ES['Abstract Equality Comparison'](Symbol.iterator, Symbol.iterator),
+			true,
+			'Abstract Equality Comparison with two identical Symbols returns true'
+		);
+
+		var x = Symbol('x');
+		t.equal(
+			ES['Abstract Equality Comparison']({ valueOf: function () { return x; } }, x),
+			true,
+			'Abstract Equality Comparison with an object that coerces to a Symbol, and that Symbol, returns true'
+		);
+		t.equal(
+			ES['Abstract Equality Comparison'](x, { valueOf: function () { return x; } }),
+			true,
+			'Abstract Equality Comparison with a Symbol, and an object that coerces to that Symbol, returns true'
+		);
+
+		t.end();
+	});
 
 	test('AdvanceStringIndex', function (t) {
 		forEach(v.nonStrings, function (nonString) {
@@ -1721,6 +1847,12 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			);
 		});
 
+		t['throws'](
+			function () { ES.CharacterRange('b', 'a'); },
+			TypeError,
+			'a backwards range throws'
+		);
+
 		t.deepEqual(
 			ES.CharacterRange('a', 'b'),
 			['a', 'b']
@@ -1730,6 +1862,38 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			ES.CharacterRange('Z', 'a'),
 			['Z', '[', '\\', ']', '^', '_', '`', 'a']
 		);
+
+		t.end();
+	});
+
+	test('CompletionRecord', function (t) {
+		t['throws'](
+			function () { return new ES.CompletionRecord('invalid'); },
+			SyntaxError,
+			'invalid Completion Record type throws'
+		);
+
+		forEach(['break', 'continue', 'return'], function (unsupportedType) {
+			var completion = ES.CompletionRecord(unsupportedType);
+			t['throws'](
+				function () { completion['?'](); },
+				SyntaxError,
+				'type ' + unsupportedType + ' is not supported'
+			);
+		});
+
+		forEach(['break', 'continue', 'return', 'throw'], function (nonNormalType) {
+			var completion = ES.CompletionRecord(nonNormalType);
+			t['throws'](
+				function () { completion['!'](); },
+				SyntaxError,
+				'assertion failed: type ' + nonNormalType + ' is not "normal"'
+			);
+		});
+
+		var sentinel = {};
+		var completion = ES.CompletionRecord('normal', sentinel);
+		t.equal(completion['!'](), sentinel, '! returns the value of a normal completion');
 
 		t.end();
 	});
@@ -1860,6 +2024,12 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				debug(nonArray) + ' is not an Array'
 			);
 		});
+
+		t['throws'](
+			function () { ES.CreateListFromArrayLike({ length: 3, 0: 'a', 1: 'b', 2: 3 }, ['String']); },
+			TypeError,
+			'an element type not present in passed elementTypes throws'
+		);
 
 		t.deepEqual(
 			ES.CreateListFromArrayLike({ length: 2, 0: 'a', 1: 'b', 2: 'c' }),
@@ -2116,6 +2286,66 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('DetachArrayBuffer', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonArrayBuffer) {
+			t['throws'](
+				function () { ES.DetachArrayBuffer(nonArrayBuffer); },
+				TypeError,
+				debug(nonArrayBuffer) + ' is not an ArrayBuffer'
+			);
+		});
+
+		t.test('ArrayBuffers', { skip: typeof ArrayBuffer !== 'function' }, function (st) {
+			var buffers = [
+				new ArrayBuffer(),
+				new ArrayBuffer(0),
+				new ArrayBuffer(4),
+				new ArrayBuffer(420)
+			];
+
+			st.test('can detach', { skip: !canDetach }, function (s2t) {
+				forEach(buffers, function (buffer) {
+					s2t.doesNotThrow(
+						function () { return new Float32Array(buffer); },
+						'can create a Float32Array from a non-detached ArrayBuffer'
+					);
+
+					s2t.equal(ES.DetachArrayBuffer(buffer), null, 'returns null');
+
+					s2t['throws'](
+						function () { return new Float32Array(buffer); },
+						TypeError,
+						'can not create a Float32Array from a now detached ArrayBuffer'
+					);
+				});
+
+				s2t.end();
+			});
+
+			// throws SyntaxError in node < 11
+			st.test('can not detach', { skip: canDetach }, function (s2t) {
+				forEach(buffers, function (buffer) {
+					s2t.doesNotThrow(
+						function () { return new Float32Array(buffer); },
+						'can create a Float32Array from a non-detached ArrayBuffer'
+					);
+
+					s2t['throws'](
+						function () { return ES.DetachArrayBuffer(buffer); },
+						SyntaxError,
+						'env does not support detaching'
+					);
+				});
+
+				s2t.end();
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+
 	test('EnumerableOwnNames', function (t) {
 		var obj = testEnumerableOwnNames(t, function (O) { return ES.EnumerableOwnNames(O); });
 
@@ -2189,6 +2419,12 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			st.end();
 		});
 		t.equal(ES.Get({ a: value }, 'a'), value, 'returns property `P` if it exists on object `O`');
+		t.end();
+	});
+
+	test('GetGlobalObject', function (t) {
+		t.equal(ES.GetGlobalObject(), global, 'returns the global object');
+
 		t.end();
 	});
 
@@ -2785,6 +3021,64 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('IsDetachedBuffer', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonArrayBuffer) {
+			t['throws'](
+				function () { ES.IsDetachedBuffer(nonArrayBuffer); },
+				TypeError,
+				debug(nonArrayBuffer) + ' is not an ArrayBuffer'
+			);
+		});
+
+		t.test('ArrayBuffers', { skip: typeof ArrayBuffer !== 'function' }, function (st) {
+			var buffers = [
+				new ArrayBuffer(),
+				new ArrayBuffer(0),
+				new ArrayBuffer(4),
+				new ArrayBuffer(420)
+			];
+
+			st.test('can detach', { skip: !canDetach }, function (s2t) {
+				forEach(buffers, function (buffer) {
+					s2t.equal(ES.IsDetachedBuffer(buffer), false, debug(buffer) + ' is not detached');
+					s2t.doesNotThrow(
+						function () { return new Float32Array(buffer); },
+						'can create a Float32Array from a non-detached ArrayBuffer'
+					);
+
+					s2t.equal(ES.DetachArrayBuffer(buffer), null, 'returns null');
+
+					s2t.equal(ES.IsDetachedBuffer(buffer), true, debug(buffer) + ' is now detached');
+					s2t['throws'](
+						function () { return new Float32Array(buffer); },
+						TypeError,
+						'can not create a Float32Array from a now detached ArrayBuffer'
+					);
+				});
+
+				s2t.end();
+			});
+
+			// throws SyntaxError in node < 11
+			st.test('can not detach', { skip: canDetach }, function (s2t) {
+				forEach(buffers, function (buffer) {
+					s2t.doesNotThrow(
+						function () { return new Float32Array(buffer); },
+						'can create a Float32Array from a non-detached ArrayBuffer'
+					);
+
+					s2t.equal(ES.IsDetachedBuffer(buffer), false, 'env does not support detaching');
+				});
+
+				s2t.end();
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+
 	test('IsExtensible', function (t) {
 		forEach(v.objects, function (object) {
 			t.equal(true, ES.IsExtensible(object), debug(object) + ' object is extensible');
@@ -2798,48 +3092,19 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
-	test('IsPromise', { skip: typeof Promise !== 'function' }, function (t) {
+	test('IsPromise', function (t) {
 		forEach(v.objects.concat(v.primitives), function (nonPromise) {
 			t.equal(ES.IsPromise(nonPromise), false, debug(nonPromise) + ' is not a Promise');
 		});
 
-		var thenable = { then: Promise.prototype.then };
-		t.equal(ES.IsPromise(thenable), false, 'generic thenable is not a Promise');
+		t.test('Promises supported', { skip: typeof Promise !== 'function' }, function (st) {
+			var thenable = { then: Promise.prototype.then };
+			st.equal(ES.IsPromise(thenable), false, 'generic thenable is not a Promise');
 
-		t.equal(ES.IsPromise(Promise.resolve()), true, 'Promise is a Promise');
+			st.equal(ES.IsPromise(Promise.resolve()), true, 'Promise is a Promise');
 
-		t.end();
-	});
-
-	test('IsPropertyDescriptor', function (t) {
-		forEach(v.primitives, function (primitive) {
-			t.equal(
-				ES.IsPropertyDescriptor(primitive),
-				false,
-				debug(primitive) + ' is not a Property Descriptor'
-			);
+			st.end();
 		});
-
-		t.equal(ES.IsPropertyDescriptor({ invalid: true }), false, 'invalid keys not allowed on a Property Descriptor');
-
-		t.equal(ES.IsPropertyDescriptor({}), true, 'empty object is an incomplete Property Descriptor');
-
-		t.equal(ES.IsPropertyDescriptor(v.accessorDescriptor()), true, 'accessor descriptor is a Property Descriptor');
-		t.equal(ES.IsPropertyDescriptor(v.mutatorDescriptor()), true, 'mutator descriptor is a Property Descriptor');
-		t.equal(ES.IsPropertyDescriptor(v.dataDescriptor()), true, 'data descriptor is a Property Descriptor');
-		t.equal(ES.IsPropertyDescriptor(v.genericDescriptor()), true, 'generic descriptor is a Property Descriptor');
-
-		t['throws'](
-			function () { ES.IsPropertyDescriptor(v.bothDescriptor()); },
-			TypeError,
-			'a Property Descriptor can not be both a Data and an Accessor Descriptor'
-		);
-
-		t['throws'](
-			function () { ES.IsPropertyDescriptor(v.bothDescriptorWritable()); },
-			TypeError,
-			'a Property Descriptor can not be both a Data and an Accessor Descriptor'
-		);
 
 		t.end();
 	});
@@ -3030,22 +3295,44 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			sentinel,
 			'when `.return` is `undefined`, invokes and returns the completion thunk'
 		);
+		t.equal(
+			ES.IteratorClose({ 'return': undefined }, ES.NormalCompletion(sentinel)),
+			sentinel,
+			'when `.return` is `undefined`, invokes and returns the Completion Record'
+		);
 
 		/* eslint no-throw-literal: 0 */
-		t['throws'](
+		t.throwsSentinel(
 			function () { ES.IteratorClose({ 'return': function () { throw sentinel; } }, function () {}); },
 			sentinel,
 			'`.return` that throws, when completionThunk does not, throws exception from `.return`'
 		);
-		t['throws'](
+		t.throwsSentinel(
+			function () { ES.IteratorClose({ 'return': function () { throw sentinel; } }, ES.NormalCompletion()); },
+			sentinel,
+			'`.return` that throws, when Completion Record does not, throws exception from `.return`'
+		);
+
+		t.throwsSentinel(
 			function () { ES.IteratorClose({ 'return': function () { throw sentinel; } }, function () { throw -1; }); },
 			-1,
 			'`.return` that throws, when completionThunk does too, throws exception from completionThunk'
 		);
-		t['throws'](
+		t.throwsSentinel(
+			function () { ES.IteratorClose({ 'return': function () { throw sentinel; } }, ES.CompletionRecord('throw', -1)); },
+			-1,
+			'`.return` that throws, when completionThunk does too, throws exception from Completion Record'
+		);
+
+		t.throwsSentinel(
 			function () { ES.IteratorClose({ 'return': function () { } }, function () { throw -1; }); },
 			-1,
 			'`.return` that does not throw, when completionThunk does, throws exception from completionThunk'
+		);
+		t.throwsSentinel(
+			function () { ES.IteratorClose({ 'return': function () { } }, ES.CompletionRecord('throw', -1)); },
+			-1,
+			'`.return` that does not throw, when completionThunk does, throws exception from Competion Record'
 		);
 
 		t.equal(
@@ -3053,6 +3340,37 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 			42,
 			'when `.return` and completionThunk do not throw, and `.return` returns an Object, returns completionThunk'
 		);
+		t.equal(
+			ES.IteratorClose({ 'return': function () { return sentinel; } }, ES.NormalCompletion(42)),
+			42,
+			'when `.return` and Completion Record do not throw, and `.return` returns an Object, returns completionThunk'
+		);
+
+		t.end();
+	});
+
+	test('max', function (t) {
+		t.equal(ES.max.apply(null, v.numbers), Math.max.apply(null, v.numbers), 'works with numbers');
+
+		t.end();
+	});
+
+	test('min', function (t) {
+		t.equal(ES.min.apply(null, v.numbers), Math.min.apply(null, v.numbers), 'works with numbers');
+
+		t.end();
+	});
+
+	test('NormalCompletion', function (t) {
+		var sentinel = {};
+		var completion = ES.NormalCompletion(sentinel);
+
+		t.ok(completion instanceof ES.CompletionRecord, 'produces an instance of CompletionRecord');
+
+		t.equal(SLOT.get(completion, '[[type]]'), 'normal', 'completion type is "normal"');
+		t.equal(completion.type(), 'normal', 'completion type is "normal" (via property)');
+		t.equal(SLOT.get(completion, '[[value]]'), sentinel, 'completion value is the argument provided');
+		t.equal(completion.value(), sentinel, 'completion value is the argument provided (via property)');
 
 		t.end();
 	});
@@ -3079,10 +3397,18 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		t.test('internal slots arg', function (st) {
 			st.doesNotThrow(function () { ES.ObjectCreate({}, []); }, 'an empty slot list is valid');
 
+			var O = ES.ObjectCreate({}, ['a', 'b']);
+			st.doesNotThrow(
+				function () {
+					SLOT.assert(O, 'a');
+					SLOT.assert(O, 'b');
+				},
+				'expected internal slots exist'
+			);
 			st['throws'](
-				function () { ES.ObjectCreate({}, ['a']); },
-				SyntaxError,
-				'internal slots are not supported'
+				function () { SLOT.assert(O, 'c'); },
+				TypeError,
+				'internal slots that should not exist throw'
 			);
 
 			st.end();
@@ -3203,10 +3529,18 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				'an empty slot list is valid'
 			);
 
+			var O = ES.OrdinaryCreateFromConstructor(function () {}, '%Array.prototype%', ['a', 'b']);
+			st.doesNotThrow(
+				function () {
+					SLOT.assert(O, 'a');
+					SLOT.assert(O, 'b');
+				},
+				'expected internal slots exist'
+			);
 			st['throws'](
-				function () { ES.OrdinaryCreateFromConstructor(function () {}, '%Array.prototype%', ['a']); },
-				SyntaxError,
-				'internal slots are not supported'
+				function () { SLOT.assert(O, 'c'); },
+				TypeError,
+				'internal slots that should not exist throw'
 			);
 
 			st.end();
@@ -3323,7 +3657,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		});
 		forEach(v.primitives, function (primitive) {
 			t['throws'](
-				function () { ES.OrdinaryDefineOwnProperty(primitive, '', v.genericDescriptor()); },
+				function () { ES.OrdinaryDefineOwnProperty({}, '', primitive); },
 				TypeError,
 				'Desc: ' + debug(primitive) + ' is not a Property Descriptor'
 			);
@@ -3356,12 +3690,22 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 		});
 
 		var C = function C() {};
+		var c = new C();
 		var D = function D() {};
-		t.equal(ES.OrdinaryHasInstance(C, new C()), true, 'constructor function has an instance of itself');
+		t.equal(ES.OrdinaryHasInstance(C, c), true, 'constructor function has an instance of itself');
 		t.equal(ES.OrdinaryHasInstance(C, new D()), false, 'constructor/instance mismatch is false');
-		t.equal(ES.OrdinaryHasInstance(D, new C()), false, 'instance/constructor mismatch is false');
+		t.equal(ES.OrdinaryHasInstance(D, c), false, 'instance/constructor mismatch is false');
 		t.equal(ES.OrdinaryHasInstance(C, {}), false, 'plain object is not an instance of a constructor');
 		t.equal(ES.OrdinaryHasInstance(Object, {}), true, 'plain object is an instance of Object');
+
+		forEach(v.primitives, function (primitive) {
+			C.prototype = primitive;
+			t['throws'](
+				function () { ES.OrdinaryHasInstance(C, c); },
+				TypeError,
+				'prototype is ' + debug(primitive)
+			);
+		});
 
 		t.end();
 	});
@@ -4229,7 +4573,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				function () {
 					return ES.ValidateAndApplyPropertyDescriptor(
 						undefined,
-						null,
+						'',
 						nonBoolean,
 						v.genericDescriptor(),
 						v.genericDescriptor()
@@ -4246,7 +4590,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				function () {
 					return ES.ValidateAndApplyPropertyDescriptor(
 						undefined,
-						null,
+						'',
 						false,
 						primitive,
 						v.genericDescriptor()
@@ -4263,7 +4607,7 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				function () {
 					return ES.ValidateAndApplyPropertyDescriptor(
 						undefined,
-						null,
+						'',
 						false,
 						v.genericDescriptor(),
 						primitive
@@ -4412,6 +4756,18 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 					undefined,
 					'property key',
 					true,
+					{},
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.dataDescriptor()))
+				),
+				true,
+				'true if Desc is generic, and lacks both [[Configurable]] and [[Enumerable]]'
+			);
+
+			st.equal(
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
 					v.descriptors.enumerable(v.dataDescriptor()),
 					ES.CompletePropertyDescriptor(v.descriptors.nonEnumerable(v.dataDescriptor()))
 				),
@@ -4429,6 +4785,53 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 				),
 				false,
 				'false if Desc is not Enumerable and current is'
+			);
+
+			st.equal(
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
+					v.accessorDescriptor(),
+					ES.CompletePropertyDescriptor(v.dataDescriptor())
+				),
+				false,
+				'false if Desc is an accessor descriptor and current is a data descriptor'
+			);
+			st.equal(
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
+					v.descriptors.nonConfigurable(v.dataDescriptor()),
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable(v.accessorDescriptor()))
+				),
+				false,
+				'false if Desc is a data descriptor and current is an accessor descriptor'
+			);
+
+			st.equal(
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
+					v.descriptors.nonConfigurable(v.accessorDescriptor()),
+					v.descriptors.nonConfigurable(v.accessorDescriptor())
+				),
+				false,
+				'false if Desc and current are both accessors with a !== Get function'
+			);
+			var fakeGetter = function () {};
+			st.equal(
+				ES.ValidateAndApplyPropertyDescriptor(
+					undefined,
+					'property key',
+					true,
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable({ '[[Get]]': fakeGetter, '[[Set]]': function () {} })),
+					ES.CompletePropertyDescriptor(v.descriptors.nonConfigurable({ '[[Get]]': fakeGetter, '[[Set]]': function () {} }))
+				),
+				false,
+				'false if Desc and current are both accessors with a !== Get function'
 			);
 
 			var descLackingEnumerable = v.accessorDescriptor();
@@ -4589,10 +4992,35 @@ var es2015 = function ES2015(ES, ops, expectedMissing, skips) {
 
 		t.end();
 	});
+
+	test('ValidateTypedArray', function (t) {
+		forEach(v.primitives.concat(v.objects, [[]]), function (nonTA) {
+			t['throws'](
+				function () { ES.ValidateTypedArray(nonTA); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		t.test('actual typed arrays', { skip: availableTypedArrays.length === 0 }, function (st) {
+			forEach(availableTypedArrays, function (TypedArray) {
+				var ta = new global[TypedArray](0);
+				st.doesNotThrow(
+					function () { ES.ValidateTypedArray(ta); },
+					debug(ta) + ' is a TypedArray'
+				);
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
 };
 
 var es2016 = function ES2016(ES, ops, expectedMissing, skips) {
 	es2015(ES, ops, expectedMissing, assign(assign({}, skips), {
+		NormalCompletion: true,
 		StringGetIndexProperty: true
 	}));
 	var test = makeTest(ES, skips);
@@ -4635,6 +5063,20 @@ var es2016 = function ES2016(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('NormalCompletion', function (t) {
+		var sentinel = {};
+		var completion = ES.NormalCompletion(sentinel);
+
+		t.ok(completion instanceof ES.CompletionRecord, 'produces an instance of CompletionRecord');
+
+		t.equal(SLOT.get(completion, '[[Type]]'), 'normal', 'completion type is "normal"');
+		t.equal(completion.type(), 'normal', 'completion type is "normal" (via method)');
+		t.equal(SLOT.get(completion, '[[Value]]'), sentinel, 'completion value is the argument provided');
+		t.equal(completion.value(), sentinel, 'completion value is the argument provided (via method)');
+
+		t.end();
+	});
+
 	test('OrdinaryGetPrototypeOf', function (t) {
 		t.test('values', { skip: !$getProto }, function (st) {
 			st.equal(ES.OrdinaryGetPrototypeOf([]), Array.prototype, 'array [[Prototype]] is Array.prototype');
@@ -4660,6 +5102,16 @@ var es2016 = function ES2016(ES, ops, expectedMissing, skips) {
 	});
 
 	test('OrdinarySetPrototypeOf', { skip: !$getProto || !$setProto }, function (t) {
+		forEach(v.primitives, function (primitive) {
+			if (primitive !== null) {
+				t['throws'](
+					function () { ES.OrdinarySetPrototypeOf({}, primitive); },
+					TypeError,
+					debug(primitive) + ' is not an Object or null'
+				);
+			}
+		});
+
 		var a = [];
 		var proto = {};
 
@@ -4742,10 +5194,39 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 	}));
 	var test = makeTest(ES, skips);
 
+	test('DetachArrayBuffer (Shared Array Buffers)', { skip: typeof SharedArrayBuffer !== 'function' }, function (t) {
+		var sabs = [
+			new SharedArrayBuffer(),
+			new SharedArrayBuffer(0)
+		];
+
+		forEach(sabs, function (sab) {
+			t['throws'](
+				function () { ES.DetachArrayBuffer(sab); },
+				TypeError,
+				debug(sab) + ' is a SharedArrayBuffer'
+			);
+		});
+
+		t.end();
+	});
+
 	test('EnumerableOwnProperties', function (t) {
+		t['throws'](
+			function () { ES.EnumerableOwnProperties({}, 'not key, value, or key+value'); },
+			TypeError,
+			'invalid "kind" throws'
+		);
+
 		var obj = testEnumerableOwnNames(t, function (O) {
 			return ES.EnumerableOwnProperties(O, 'key');
 		});
+
+		t.deepEqual(
+			ES.EnumerableOwnProperties(obj, 'key'),
+			['own'],
+			'returns enumerable own keys'
+		);
 
 		t.deepEqual(
 			ES.EnumerableOwnProperties(obj, 'value'),
@@ -4758,6 +5239,32 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 			[['own', obj.own]],
 			'returns enumerable own entries'
 		);
+
+		t.test('getters changing properties of unvisited entries', { skip: !defineProperty.oDP }, function (st) {
+			var o = { a: 1, b: 2, c: 3, d: 4 };
+			defineProperty(o, 'a', {
+				enumerable: true,
+				get: function () {
+					defineProperty(o, 'b', { enumerable: false });
+					return 1;
+				}
+			});
+			defineProperty(o, 'c', { enumerable: false });
+
+			st.deepEqual(
+				ES.EnumerableOwnProperties(o, 'key'),
+				['a', 'b', 'd'],
+				'`key` kind returns all initially enumerable own keys'
+			);
+
+			st.deepEqual(
+				ES.EnumerableOwnProperties(o, 'key+value'),
+				[['a', 1], ['d', 4]],
+				'key+value returns only own enumerable entries that remain enumerable at the time they are visited'
+			);
+
+			st.end();
+		});
 
 		t.end();
 	});
@@ -4802,6 +5309,358 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('NumberToRawBytes', function (t) {
+		forEach(v.nonStrings.concat('', 'Byte'), function (nonTAType) {
+			t['throws'](
+				function () { ES.NumberToRawBytes(nonTAType, 0, false); },
+				TypeError,
+				debug(nonTAType) + ' is not a String, or not a TypedArray type'
+			);
+		});
+
+		forEach(v.nonNumbers, function (nonNumber) {
+			t['throws'](
+				function () { ES.NumberToRawBytes('Int8', nonNumber, false); },
+				TypeError,
+				debug(nonNumber) + ' is not a Number'
+			);
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.NumberToRawBytes('Int8', [0], nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		t.test('Float32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[-0, [0, 0, 0, 128]],
+				[1, [0, 0, 128, 63]],
+				[0.75, [0, 0, 64, 63]],
+				[0.5, [0, 0, 0, 63]],
+				[-1.5, [0, 0, 192, 191]],
+				[-3.5, [0, 0, 96, 192]],
+				[16777216, [0, 0, 128, 75]], // max safe float32
+				[2147483648, [0, 0, 0, 79]], // 2147483647 isn't representable as a float32
+				[Infinity, [0, 0, 128, 127]],
+				[-Infinity, [0, 0, 128, 255]],
+				[NaN, [0, 0, 192, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float32Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Float32', float, true),
+					bytes,
+					'little-endian: ' + debug(float) + ' produces bytes for it'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Float32', float, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(float) + ' produces bytes for it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Float64', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0, 0, 0, 0, 0]],
+				[-0, [0, 0, 0, 0, 0, 0, 0, 128]],
+				[1, [0, 0, 0, 0, 0, 0, 240, 63]],
+				[0.75, [0, 0, 0, 0, 0, 0, 232, 63]],
+				[0.5, [0, 0, 0, 0, 0, 0, 224, 63]],
+				[-1.5, [0, 0, 0, 0, 0, 0, 248, 191]],
+				[-3.5, [0, 0, 0, 0, 0, 0, 12, 192]],
+				[2147483647, [0, 0, 192, 255, 255, 255, 223, 65]],
+				[9007199254740992, [0, 0, 0, 0, 0, 0, 64, 67]],
+				[Infinity, [0, 0, 0, 0, 0, 0, 240, 127]],
+				[-Infinity, [0, 0, 0, 0, 0, 0, 240, 255]],
+				[NaN, [0, 0, 0, 0, 0, 0, 248, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float64Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Float64', float, true),
+					bytes,
+					'little-endian: ' + debug(float) + ' produces bytes for it'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Float64', float, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(float) + ' produces bytes for it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int8', function (st) {
+			forEach([
+				[0, [0]],
+				[-1, [255]],
+				[1, [1]],
+				[127, [127]],
+				[-127, [129]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int8Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Int8', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Int8', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8', function (st) {
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint8', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint8', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8C', function (st) {
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint8ClampedArray(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint8C', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint8C', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int16', function (st) {
+			forEach([
+				[0, [0, 0]],
+				[-1, [255, 255]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[-127, [129, 255]],
+				[255, [255, 0]],
+				[-255, [1, 255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Int16', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Int16', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint16', function (st) {
+			forEach([
+				[0, [0, 0]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[255, [255, 0]],
+				[256, [0, 1]],
+				[511, [255, 1]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint16', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint16', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[-1, [255, 255, 255, 255]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Int32', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Int32', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint32', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumberToRawBytes('Uint32', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+
 	test('OrdinaryToPrimitive', function (t) {
 		forEach(v.primitives, function (primitive) {
 			t['throws'](
@@ -4815,6 +5674,16 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 					ES.OrdinaryToPrimitive(Object(primitive), 'number'),
 					primitive,
 					debug(Object(primitive)) + ' becomes ' + debug(primitive)
+				);
+			}
+		});
+
+		forEach(v.nonStrings, function (nonString) {
+			if (typeof nonString !== 'number') {
+				t['throws'](
+					function () { ES.OrdinaryToPrimitive({}, nonString); },
+					TypeError,
+					debug(nonString) + ' is not a String or a Number'
 				);
 			}
 		});
@@ -4896,6 +5765,464 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('RawBytesToNumber', function (t) {
+		forEach(v.nonStrings.concat('', 'Byte'), function (nonTAType) {
+			t['throws'](
+				function () { ES.RawBytesToNumber(nonTAType, [], false); },
+				TypeError,
+				debug(nonTAType) + ' is not a String, or not a TypedArray type'
+			);
+		});
+
+		forEach(v.primitives.concat(v.objects), function (nonArray) {
+			t['throws'](
+				function () { ES.RawBytesToNumber('Int8', nonArray, false); },
+				TypeError,
+				debug(nonArray) + ' is not an Array'
+			);
+		});
+		forEach([-1, 1.5, 256], function (nonByte) {
+			t['throws'](
+				function () { ES.RawBytesToNumber('Int8', [nonByte], false); },
+				TypeError,
+				debug(nonByte) + ' is not a valid "byte"'
+			);
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.RawBytesToNumber('Int8', [0], nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		t.test('Float32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Float32', [0, 0, 0], false); },
+				RangeError,
+				'Float32 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Float32', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float32 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[-0, [0, 0, 0, 128]],
+				[1, [0, 0, 128, 63]],
+				[0.75, [0, 0, 64, 63]],
+				[0.5, [0, 0, 0, 63]],
+				[-1.5, [0, 0, 192, 191]],
+				[-3.5, [0, 0, 96, 192]],
+				[16777216, [0, 0, 128, 75]], // max safe float32
+				[2147483648, [0, 0, 0, 79]], // 2147483647 isn't representable as a float32
+				[Infinity, [0, 0, 128, 127]],
+				[-Infinity, [0, 0, 128, 255]],
+				[NaN, [0, 0, 192, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float32Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Float32', bytes, true),
+					float,
+					'little-endian: bytes for ' + debug(float) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Float32', bytes.slice().reverse(), false),
+					float,
+					'big-endian: bytes for ' + debug(float) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Float64', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Float64', [0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float64 with less than 8 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Float64', [0, 0, 0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float64 with more than 8 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0, 0, 0, 0, 0]],
+				[-0, [0, 0, 0, 0, 0, 0, 0, 128]],
+				[1, [0, 0, 0, 0, 0, 0, 240, 63]],
+				[0.75, [0, 0, 0, 0, 0, 0, 232, 63]],
+				[0.5, [0, 0, 0, 0, 0, 0, 224, 63]],
+				[-1.5, [0, 0, 0, 0, 0, 0, 248, 191]],
+				[-3.5, [0, 0, 0, 0, 0, 0, 12, 192]],
+				[2147483647, [0, 0, 192, 255, 255, 255, 223, 65]],
+				[9007199254740992, [0, 0, 0, 0, 0, 0, 64, 67]],
+				[Infinity, [0, 0, 0, 0, 0, 0, 240, 127]],
+				[-Infinity, [0, 0, 0, 0, 0, 0, 240, 255]],
+				[NaN, [0, 0, 0, 0, 0, 0, 248, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float64Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Float64', bytes, true),
+					float,
+					'little-endian: bytes for ' + debug(float) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Float64', bytes.slice().reverse(), false),
+					float,
+					'big-endian: bytes for ' + debug(float) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int8', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Int8', [], false); },
+				RangeError,
+				'Int8 with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Int8', [0, 0], false); },
+				RangeError,
+				'Int8 with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[-1, [255]],
+				[1, [1]],
+				[127, [127]],
+				[-127, [129]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int8Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Int8', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Int8', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint8', [], false); },
+				RangeError,
+				'Uint8 with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint8', [0, 0], false); },
+				RangeError,
+				'Uint8 with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				st.equal(
+					ES.RawBytesToNumber('Uint8', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Uint8', bytes, false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8C', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint8C', [], false); },
+				RangeError,
+				'Uint8C with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint8C', [0, 0], false); },
+				RangeError,
+				'Uint8C with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint8ClampedArray(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Uint8C', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Uint8C', bytes, false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int16', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Int16', [0], false); },
+				RangeError,
+				'Int16 with less than 2 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint8C', [0, 0, 0], false); },
+				RangeError,
+				'Int16 with more than 2 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0]],
+				[-1, [255, 255]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[-127, [129, 255]],
+				[255, [255, 0]],
+				[-255, [1, 255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Int16', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Int16', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint16', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint16', [0], false); },
+				RangeError,
+				'Uint16 with less than 2 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint16', [0, 0, 0], false); },
+				RangeError,
+				'Uint16 with more than 2 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[255, [255, 0]],
+				[256, [0, 1]],
+				[511, [255, 1]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Uint16', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Uint16', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint16', [0, 0, 0], false); },
+				RangeError,
+				'Uint16 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint16', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Uint16 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[-1, [255, 255, 255, 255]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Int32', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Int32', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint32', [0, 0, 0], false); },
+				RangeError,
+				'Uint32 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumber('Uint32', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Uint32 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumber('Uint32', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumber('Uint32', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+
 	test('StringGetOwnProperty', function (t) {
 		forEach(v.nonStrings.concat(v.strings), function (nonBoxedString) {
 			t['throws'](
@@ -4913,6 +6240,14 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 		});
 
 		t.equal(ES.StringGetOwnProperty(Object(''), '0'), undefined, 'empty boxed string yields undefined');
+
+		forEach(v.symbols, function (symbol) {
+			t.equal(
+				ES.StringGetOwnProperty(Object('abc'), symbol),
+				undefined,
+				debug(symbol) + ' is not a String, and yields undefined'
+			);
+		});
 
 		forEach(v.strings, function (string) {
 			if (string) {
@@ -4973,6 +6308,77 @@ var es2017 = function ES2017(ES, ops, expectedMissing, skips) {
 
 		t.end();
 	});
+
+	test('ValidateAtomicAccess', function (t) {
+		forEach(v.primitives.concat(v.objects, [[]]), function (nonTA) {
+			t['throws'](
+				function () { ES.ValidateAtomicAccess(nonTA, 0); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		t.test('actual typed arrays', { skip: availableTypedArrays.length === 0 }, function (st) {
+			forEach(availableTypedArrays, function (TypedArray) {
+				var ta = new global[TypedArray](8);
+
+				st.doesNotThrow(
+					function () { ES.ValidateAtomicAccess(ta, 0); },
+					debug(ta) + ' is an integer TypedArray'
+				);
+
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, -1); },
+					RangeError, // via ToIndex
+					'a requestIndex of -1 is <= 0'
+				);
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, 8); },
+					RangeError,
+					'a requestIndex === length throws'
+				);
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, 9); },
+					RangeError,
+					'a requestIndex > length throws'
+				);
+
+				st.equal(ES.ValidateAtomicAccess(ta, 0), 0, TypedArray + ': requestIndex of 0 gives 0');
+				st.equal(ES.ValidateAtomicAccess(ta, 1), 1, TypedArray + ': requestIndex of 1 gives 1');
+				st.equal(ES.ValidateAtomicAccess(ta, 2), 2, TypedArray + ': requestIndex of 2 gives 2');
+				st.equal(ES.ValidateAtomicAccess(ta, 3), 3, TypedArray + ': requestIndex of 3 gives 3');
+				st.equal(ES.ValidateAtomicAccess(ta, 4), 4, TypedArray + ': requestIndex of 4 gives 4');
+				st.equal(ES.ValidateAtomicAccess(ta, 5), 5, TypedArray + ': requestIndex of 5 gives 5');
+				st.equal(ES.ValidateAtomicAccess(ta, 6), 6, TypedArray + ': requestIndex of 6 gives 6');
+				st.equal(ES.ValidateAtomicAccess(ta, 7), 7, TypedArray + ': requestIndex of 7 gives 7');
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+};
+
+var makeAsyncFromSyncIterator = function makeAsyncFromSyncIterator(ES, end, throwMethod, returnMethod) {
+	var i = 0;
+	var iterator = {
+		next: function next() {
+			try {
+				return {
+					done: i > end,
+					value: i
+				};
+			} finally {
+				i += 1;
+			}
+		},
+		'return': returnMethod,
+		'throw': throwMethod
+	};
+	var syncIteratorRecord = makeIteratorRecord(iterator);
+
+	return ES.CreateAsyncFromSyncIterator(syncIteratorRecord);
 };
 
 var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
@@ -5115,6 +6521,166 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('CreateAsyncFromSyncIterator', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonIteratorRecord) {
+			t['throws'](
+				function () { ES.CreateAsyncFromSyncIterator(nonIteratorRecord); },
+				TypeError,
+				debug(nonIteratorRecord) + ' is not an Iterator Record'
+			);
+		});
+
+		t.test('with Promise support', { skip: typeof Promise === 'undefined' }, function (st) {
+			var asyncIteratorRecord = makeAsyncFromSyncIterator(ES, 5);
+
+			st.deepEqual(
+				keys(asyncIteratorRecord).sort(),
+				['[[Iterator]]', '[[NextMethod]]', '[[Done]]'].sort(),
+				'has expected Iterator Record fields'
+			);
+			st.equal(typeof asyncIteratorRecord['[[NextMethod]]'], 'function', '[[NextMethod]] is a function');
+			st.equal(typeof asyncIteratorRecord['[[Done]]'], 'boolean', '[[Done]] is a boolean');
+
+			var itNoThrow = asyncIteratorRecord['[[Iterator]]'];
+
+			st.test('.next()', function (s2t) {
+				var i = 0;
+				var iterator = {
+					next: function next(x) {
+						try {
+							return {
+								done: i > 2,
+								value: [i, arguments.length, x]
+							};
+						} finally {
+							i += 1;
+						}
+					}
+				};
+				var syncIteratorRecord = makeIteratorRecord(iterator);
+
+				var record = ES.CreateAsyncFromSyncIterator(syncIteratorRecord);
+				var it = record['[[Iterator]]'];
+				var next = record['[[NextMethod]]'];
+
+				s2t.test('no next arg', function (s3t) {
+					return next.call(it).then(function (result) {
+						s3t.deepEqual(
+							result,
+							{ value: [0, 0, undefined], done: false },
+							'result is correct'
+						);
+					});
+				});
+
+				s2t.test('no next arg', function (s3t) {
+					return next.call(it, 42).then(function (result) {
+						s3t.deepEqual(
+							result,
+							{ value: [1, 1, 42], done: false },
+							'result is correct'
+						);
+					});
+				});
+
+				s2t.end();
+			});
+
+			st.test('.throw()', function (s2t) {
+				var asyncThrows = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					function throws(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+
+						throw true;
+					}
+				)['[[Iterator]]'];
+
+				var asyncThrowReturnsNonObject = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					function throws(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+					}
+				)['[[Iterator]]'];
+
+				var asyncThrowReturnsObject = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					function throws(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+
+						return {
+							done: true,
+							value: Promise.resolve(42)
+						};
+					}
+				)['[[Iterator]]'];
+
+				return Promise.all([
+					itNoThrow['throw']().then(s2t.fail, s2t.pass), // "pass", since it rejects with `undefined`
+					itNoThrow['throw'](true).then(s2t.fail, s2t.ok), // "ok", since it rejects with `true`
+					asyncThrows['throw']().then(s2t.fail, s2t.ok), // "ok", since it rejects with `true`
+					asyncThrows['throw'](false).then(s2t.fail, s2t.ok), // "ok", since it rejects with `true`
+					asyncThrowReturnsNonObject['throw']().then(s2t.fail, s2t.ok), // "ok", since it rejects with an error
+					asyncThrowReturnsNonObject['throw'](false).then(s2t.fail, s2t.ok), // "ok", since it rejects with an error
+					asyncThrowReturnsObject['throw']().then(function (x) { s2t.deepEqual(x, { done: true, value: 42 }); }),
+					asyncThrowReturnsObject['throw'](false).then(function (x) { s2t.deepEqual(x, { done: true, value: 42 }); })
+				]);
+			});
+
+			st.test('.return()', function (s2t) {
+				var asyncThrows = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					void undefined,
+					function returns(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+
+						throw true;
+					}
+				)['[[Iterator]]'];
+
+				var asyncThrowReturnsNonObject = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					void undefined,
+					function returns(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+					}
+				)['[[Iterator]]'];
+
+				var asyncThrowReturnsObject = makeAsyncFromSyncIterator(
+					ES,
+					5,
+					void undefined,
+					function returns(x) {
+						s2t.equal(x, arguments.length === 1 ? false : void undefined, '.throw() called with `false`, or nothing');
+
+						return {
+							done: true,
+							value: Promise.resolve(42)
+						};
+					}
+				)['[[Iterator]]'];
+
+				return Promise.all([
+					itNoThrow['return']().then(function (x) { s2t.deepEqual(x, { done: true, value: void undefined }); }),
+					itNoThrow['return'](true).then(function (x) { s2t.deepEqual(x, { done: true, value: true }); }),
+					asyncThrows['return']().then(s2t.fail, s2t.ok), // "ok", since it rejects with `true`
+					asyncThrows['return'](false).then(s2t.fail, s2t.ok), // "ok", since it rejects with `true`
+					asyncThrowReturnsNonObject['return']().then(s2t.fail, s2t.ok), // "ok", since it rejects with an error
+					asyncThrowReturnsNonObject['return'](false).then(s2t.fail, s2t.ok), // "ok", since it rejects with an error
+					asyncThrowReturnsObject['return']().then(function (x) { s2t.deepEqual(x, { done: true, value: 42 }); }),
+					asyncThrowReturnsObject['return'](false).then(function (x) { s2t.deepEqual(x, { done: true, value: 42 }); })
+				]);
+			});
+
+			return testAsyncIterator(st, asyncIteratorRecord['[[Iterator]]'], [0, 1, 2, 3, 4]);
+		});
+	});
+
 	test('DateString', function (t) {
 		forEach(v.nonNumbers.concat(NaN), function (nonNumberOrNaN) {
 			t['throws'](
@@ -5130,9 +6696,21 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 	});
 
 	test('EnumerableOwnPropertyNames', function (t) {
+		t['throws'](
+			function () { ES.EnumerableOwnPropertyNames({}, 'not key, value, or key+value'); },
+			TypeError,
+			'invalid "kind" throws'
+		);
+
 		var obj = testEnumerableOwnNames(t, function (O) {
 			return ES.EnumerableOwnPropertyNames(O, 'key');
 		});
+
+		t.deepEqual(
+			ES.EnumerableOwnPropertyNames(obj, 'key'),
+			['own'],
+			'returns enumerable own keys'
+		);
 
 		t.deepEqual(
 			ES.EnumerableOwnPropertyNames(obj, 'value'),
@@ -5145,6 +6723,32 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 			[['own', obj.own]],
 			'returns enumerable own entries'
 		);
+
+		t.test('getters changing properties of unvisited entries', { skip: !defineProperty.oDP }, function (st) {
+			var o = { a: 1, b: 2, c: 3, d: 4 };
+			defineProperty(o, 'a', {
+				enumerable: true,
+				get: function () {
+					defineProperty(o, 'b', { enumerable: false });
+					return 1;
+				}
+			});
+			defineProperty(o, 'c', { enumerable: false });
+
+			st.deepEqual(
+				ES.EnumerableOwnPropertyNames(o, 'key'),
+				['a', 'b', 'd'],
+				'`key` kind returns all initially enumerable own keys'
+			);
+
+			st.deepEqual(
+				ES.EnumerableOwnPropertyNames(o, 'key+value'),
+				[['a', 1], ['d', 4]],
+				'key+value returns only own enumerable entries that remain enumerable at the time they are visited'
+			);
+
+			st.end();
+		});
 
 		t.end();
 	});
@@ -5282,6 +6886,17 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 			}
 		}
 
+		t.equal(
+			ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, undefined, 'a>$<foo><z'),
+			'a>$<oo><z',
+			'works with the named capture regex without named captures'
+		);
+		t.equal(
+			ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, undefined, 'a>$<foo>$<z'),
+			'a>$<oo>$<',
+			'works with a mismatched $<'
+		);
+
 		t.test('named captures', function (st) {
 			var namedCaptures = {
 				foo: 'foo!'
@@ -5291,6 +6906,24 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 				ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, namedCaptures, 'a>$<foo><z'),
 				'a>foo!<z',
 				'supports named captures'
+			);
+
+			st.equal(
+				ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, namedCaptures, 'a>$<foo>$z'),
+				'a>foo!$z',
+				'works with a $z'
+			);
+
+			st.equal(
+				ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, namedCaptures, '$<foo'),
+				'<foo',
+				'supports named captures with a mismatched <'
+			);
+
+			st.equal(
+				ES.GetSubstitution('abcdef', 'abcdefghi', 0, captures, namedCaptures, 'a>$<bar><z'),
+				'a><z',
+				'supports named captures with a missing namedCapture'
 			);
 
 			st.end();
@@ -5469,6 +7102,19 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('ThrowCompletion', function (t) {
+		var sentinel = {};
+		var completion = ES.ThrowCompletion(sentinel);
+
+		t.ok(completion instanceof ES.CompletionRecord, 'produces an instance of CompletionRecord');
+		t.equal(SLOT.get(completion, '[[Type]]'), 'throw', 'completion type is "throw"');
+		t.equal(completion.type(), 'throw', 'completion type is "throw" (via property)');
+		t.equal(SLOT.get(completion, '[[Value]]'), sentinel, 'completion value is the argument provided');
+		t.equal(completion.value(), sentinel, 'completion value is the argument provided (via property)');
+
+		t.end();
+	});
+
 	test('TimeString', function (t) {
 		forEach(v.nonNumbers.concat(NaN), function (nonNumberOrNaN) {
 			t['throws'](
@@ -5509,6 +7155,170 @@ var es2018 = function ES2018(ES, ops, expectedMissing, skips) {
 
 		t.end();
 	});
+
+	test('IteratorClose', function (t) {
+		var sentinel = {};
+		t['throws'](
+			function () { ES.IteratorClose({ 'return': function () { throw sentinel; } }, ES.ThrowCompletion(-1)); },
+			-1,
+			'`.return` that throws, when completionThunk does too, throws exception from Competion Record'
+		);
+		t['throws'](
+			function () { ES.IteratorClose({ 'return': function () { } }, ES.ThrowCompletion(-1)); },
+			-1,
+			'`.return` that does not throw, when completionThunk does, throws exception from Competion Record'
+		);
+
+		t.end();
+	});
+
+	test('AsyncIteratorClose', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonIteratorRecord) {
+			t['throws'](
+				function () { ES.AsyncIteratorClose(nonIteratorRecord); },
+				TypeError,
+				debug(nonIteratorRecord) + ' is not an Iterator Record'
+			);
+		});
+
+		var iterator = {
+			next: function next() {}
+		};
+		var iteratorRecord = makeIteratorRecord(iterator);
+
+		forEach(v.primitives.concat(v.objects), function (nonCompletionRecord) {
+			t['throws'](
+				function () { ES.AsyncIteratorClose(iteratorRecord, nonCompletionRecord); },
+				TypeError,
+				debug(nonCompletionRecord) + ' is not a CompletionRecord'
+			);
+		});
+
+		var sentinel = {};
+		var completionRecord = ES.NormalCompletion(sentinel);
+
+		t.test('Promises unsupported', { skip: typeof Promise === 'function' }, function (st) {
+			st['throws'](
+				function () { ES.AsyncIteratorClose(iteratorRecord, completionRecord); },
+				SyntaxError,
+				'Promises are not supported'
+			);
+
+			st.end();
+		});
+
+		t.test('Promises supported', { skip: typeof Promise === 'undefined' }, function (st) {
+			st.test('no return method', function (s2t) {
+				var nullReturnIterator = {
+					next: function next() {},
+					'return': null
+				};
+				var nullReturnIteratorRecord = makeIteratorRecord(nullReturnIterator);
+
+				return Promise.all([
+					ES.AsyncIteratorClose(iteratorRecord, completionRecord).then(function (result) {
+						s2t.equal(result, completionRecord, 'returns a Promise for the original passed completion record (undefined)');
+					}),
+					ES.AsyncIteratorClose(nullReturnIteratorRecord, completionRecord).then(function (result) {
+						s2t.equal(result, completionRecord, 'returns a Promise for the original passed completion record (null)');
+					})
+				]);
+			});
+
+			st.test('non-function return method', function (s2t) {
+				return reduce(
+					v.nonFunctions,
+					function (prev, nonFunction) {
+						if (nonFunction == null) {
+							return prev;
+						}
+						return prev.then(function () {
+							var badIterator = {
+								next: function next() {},
+								'return': nonFunction
+							};
+							var badIteratorRecord = makeIteratorRecord(badIterator);
+
+							return ES.AsyncIteratorClose(badIteratorRecord, completionRecord).then(
+								function (x) {
+									throw debug(x) + '/' + debug(nonFunction);
+								},
+								function (e) {
+									s2t.comment('`.return` of ' + debug(nonFunction) + ' is not a function');
+								}
+							);
+						});
+					},
+					Promise.resolve()
+				);
+			});
+
+			st.test('function return method (returns object)', function (s2t) {
+				var returnableIterator = {
+					next: function next() {},
+					'return': function Return() {
+						s2t.equal(arguments.length, 0, 'no args passed to `.return`');
+						return {};
+					}
+				};
+				var returnableRecord = makeIteratorRecord(returnableIterator);
+
+				return ES.AsyncIteratorClose(returnableRecord, completionRecord);
+			});
+
+			forEach(v.primitives, function (nonObject) {
+				st.test('function return method (returns non-object ' + debug(nonObject) + ')', function (s2t) {
+					var returnableIterator = {
+						next: function next() {},
+						'return': function Return() {
+							s2t.equal(arguments.length, 0, 'no args passed to `.return`');
+							return nonObject;
+						}
+					};
+					var returnableRecord = makeIteratorRecord(returnableIterator);
+
+					return ES.AsyncIteratorClose(returnableRecord, completionRecord).then(s2t.fail, function (e) {
+						s2t.ok(e instanceof TypeError, 'throws on non-object return value');
+					});
+				});
+			});
+
+			st.test('return method throws, completion is normal', function (s2t) {
+				var returnThrowIterator = {
+					next: function next() {},
+					'return': function Return() {
+						s2t.equal(arguments.length, 0, 'no args passed to `.return`');
+						throw sentinel;
+					}
+				};
+				var returnableRecord = makeIteratorRecord(returnThrowIterator);
+
+				return ES.AsyncIteratorClose(returnableRecord, completionRecord).then(s2t.fail, function (e) {
+					s2t.equal(e, sentinel, 'return function exception is propagated');
+				});
+			});
+
+			st.test('return method throws, completion is throw', function (s2t) {
+				var throwCompletion = ES.ThrowCompletion(sentinel);
+				var returnThrowIterator = {
+					next: function next() {},
+					'return': function Return() {
+						s2t.equal(arguments.length, 0, 'no args passed to `.return`');
+						throw 42;
+					}
+				};
+				var returnableRecord = makeIteratorRecord(returnThrowIterator);
+
+				return ES.AsyncIteratorClose(returnableRecord, throwCompletion).then(s2t.fail, function (e) {
+					s2t.equal(e, sentinel, 'return function exception is overridden by throw completion value');
+				});
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
 };
 
 var es2019 = function ES2019(ES, ops, expectedMissing, skips) {
@@ -5536,7 +7346,7 @@ var es2019 = function ES2019(ES, ops, expectedMissing, skips) {
 		});
 
 		t.test('Symbol support', { skip: !v.hasSymbols }, function (st) {
-			st.plan(4);
+			st.plan(5 + v.primitives.length);
 
 			var O = {};
 			st.equal(ES.AddEntriesFromIterable(O, [], function () {}), O, 'returns the target');
@@ -5548,8 +7358,74 @@ var es2019 = function ES2019(ES, ops, expectedMissing, skips) {
 			};
 			ES.AddEntriesFromIterable(O, ['a'].entries(), adder);
 
+			forEach(v.primitives, function (primitive) {
+				var badIterator = {
+					next: function next() {
+						return {
+							done: false,
+							value: primitive
+						};
+					}
+				};
+				var badIterable = {};
+				badIterable[Symbol.iterator] = function () { return badIterator; };
+
+				st['throws'](
+					function () { ES.AddEntriesFromIterable(O, badIterable, adder); },
+					TypeError,
+					debug(primitive) + ' is not an Object'
+				);
+			});
+
+			var badder = function (key, value) {
+				throw new EvalError(key + value);
+			};
+			st['throws'](
+				function () { ES.AddEntriesFromIterable(O, [[1, 2]], badder); },
+				EvalError,
+				'bad adder throws'
+			);
+
 			st.end();
 		});
+
+		t.end();
+	});
+
+	test('AsyncFromSyncIteratorContinuation', function (t) {
+		forEach(v.primitives, function (primitive) {
+			t['throws'](
+				function () { ES.AsyncFromSyncIteratorContinuation(primitive); },
+				TypeError,
+				debug(primitive) + ' is not an Object'
+			);
+		});
+
+		t['throws'](
+			function () { ES.AsyncFromSyncIteratorContinuation({}, null); },
+			SyntaxError,
+			'despite the spec supporting 2 args, AsyncFromSyncIteratorContinuation only takes 1'
+		);
+
+		// TODO: test directly, instead of only implicitly via CreateAsyncFromSyncIterator
+
+		t.end();
+	});
+
+	test('AsyncFromSyncIteratorContinuation', function (t) {
+		forEach(v.nonObjects, function (nonObject) {
+			t['throws'](
+				function () { ES.AsyncFromSyncIteratorContinuation(nonObject); },
+				TypeError,
+				debug(nonObject) + ' is not an Object'
+			);
+		});
+
+		t['throws'](
+			function () { ES.AsyncFromSyncIteratorContinuation({}, null); },
+			SyntaxError,
+			'passing a promisecapability is not supported in es-abstract'
+		);
 
 		t.end();
 	});
@@ -5578,6 +7454,15 @@ var es2019 = function ES2019(ES, ops, expectedMissing, skips) {
 				ES.FlattenIntoArray(a, o, o.length, 0, 1, mapper, thisArg);
 				tt.deepEqual(a, expected);
 			};
+
+			st['throws'](
+				function () {
+					var o = [[1], 2, , [[3]], [], 4, [[[[5]]]]]; // eslint-disable-line no-sparse-arrays
+					ES.FlattenIntoArray([], o, o.length, 0, 1, function () {});
+				},
+				TypeError,
+				'missing thisArg throws'
+			);
 
 			var double = function double(x) {
 				return typeof x === 'number' ? 2 * x : x;
@@ -5611,6 +7496,12 @@ var es2019 = function ES2019(ES, ops, expectedMissing, skips) {
 			st.end();
 		});
 
+		t['throws'](
+			function () { ES.TrimString('abc', 'not start, end, or start+end'); },
+			TypeError,
+			'invalid `where` value'
+		);
+
 		var string = ' \n abc  \n ';
 		t.equal(ES.TrimString(string, 'start'), string.slice(string.indexOf('a')));
 		t.equal(ES.TrimString(string, 'end'), string.slice(0, string.lastIndexOf('c') + 1));
@@ -5624,8 +7515,10 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 	es2019(ES, ops, expectedMissing, assign({}, skips, {
 		CopyDataProperties: true,
 		GetIterator: true,
+		NumberToRawBytes: true,
 		NumberToString: true,
 		ObjectCreate: true,
+		RawBytesToNumber: true,
 		SameValueNonNumber: true,
 		ToInteger: true,
 		ToNumber: true,
@@ -5699,6 +7592,58 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 			false,
 			debug(bigIntObject) + ' != ' + debug(BigInt(1))
 		);
+
+		forEach([NaN, Infinity, -Infinity], function (nonFinite) {
+			t.equal(
+				ES['Abstract Equality Comparison'](BigInt(1), nonFinite),
+				false,
+				debug(BigInt(1)) + ' != ' + debug(nonFinite)
+			);
+			t.equal(
+				ES['Abstract Equality Comparison'](nonFinite, BigInt(1)),
+				false,
+				debug(nonFinite) + ' != ' + debug(BigInt(1))
+			);
+		});
+
+		t.end();
+	});
+
+	test('Abstract Relational Comparison', { skip: !hasBigInts }, function (t) {
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), '1', true), true, 'LeftFirst: 0n is less than "1"');
+		t.equal(ES['Abstract Relational Comparison']('1', $BigInt(0), true), false, 'LeftFirst: "1" is not less than 0n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), '1', false), true, '!LeftFirst: 0n is less than "1"');
+		t.equal(ES['Abstract Relational Comparison']('1', $BigInt(0), false), false, '!LeftFirst: "1" is not less than 0n');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), 1, true), true, 'LeftFirst: 0n is less than 1');
+		t.equal(ES['Abstract Relational Comparison'](1, $BigInt(0), true), false, 'LeftFirst: 1 is not less than 0n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), 1, false), true, '!LeftFirst: 0n is less than 1');
+		t.equal(ES['Abstract Relational Comparison'](1, $BigInt(0), false), false, '!LeftFirst: 1 is not less than 0n');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), $BigInt(1), true), true, 'LeftFirst: 0n is less than 1n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(1), $BigInt(0), true), false, 'LeftFirst: 1n is not less than 0n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), $BigInt(1), false), true, '!LeftFirst: 0n is less than 1n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(1), $BigInt(0), false), false, '!LeftFirst: 1n is not less than 0n');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), 'NaN', true), undefined, 'LeftFirst: 0n and "NaN" produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison']('NaN', $BigInt(0), true), undefined, 'LeftFirst: "NaN" and 0n produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), 'NaN', false), undefined, '!LeftFirst: 0n and "NaN" produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison']('NaN', $BigInt(0), false), undefined, '!LeftFirst: "NaN" and 0n produce `undefined`');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), NaN, true), undefined, 'LeftFirst: 0n and NaN produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison'](NaN, $BigInt(0), true), undefined, 'LeftFirst: NaN and 0n produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), NaN, false), undefined, '!LeftFirst: 0n and NaN produce `undefined`');
+		t.equal(ES['Abstract Relational Comparison'](NaN, $BigInt(0), false), undefined, '!LeftFirst: NaN and 0n produce `undefined`');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), Infinity, true), true, 'LeftFirst: 0n is less than Infinity');
+		t.equal(ES['Abstract Relational Comparison'](Infinity, $BigInt(0), true), false, 'LeftFirst: Infinity is not less than 0n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), Infinity, false), true, '!LeftFirst: 0n is less than Infinity');
+		t.equal(ES['Abstract Relational Comparison'](Infinity, $BigInt(0), false), false, '!LeftFirst: Infinity is not less than 0n');
+
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), -Infinity, true), false, 'LeftFirst: 0n is not less than -Infinity');
+		t.equal(ES['Abstract Relational Comparison'](-Infinity, $BigInt(0), true), true, 'LeftFirst: -Infinity is less than 0n');
+		t.equal(ES['Abstract Relational Comparison']($BigInt(0), -Infinity, false), false, '!LeftFirst: 0n is not less than -Infinity');
+		t.equal(ES['Abstract Relational Comparison'](-Infinity, $BigInt(0), false), true, '!LeftFirst: -Infinity is less than 0n');
 
 		t.end();
 	});
@@ -6178,16 +8123,39 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
-	test('BigIntBitwiseOp', { skip: !hasBigInts }, function (t) {
-		t['throws'](
-			function () { ES.BigIntBitwiseOp('invalid', BigInt(0), BigInt(0)); },
-			TypeError,
-			'throws with an invalid op'
-		);
+	test('BigIntBitwiseOp', function (t) {
+		forEach(v.numbers, function (number) {
+			t['throws'](
+				function () { ES.BigIntBitwiseOp('&', number, number); },
+				TypeError,
+				debug(number) + ' is not a BigInt'
+			);
+		});
 
-		t.equal(ES.BigIntBitwiseOp('&', BigInt(1), BigInt(2)), BigInt(1) & BigInt(2));
-		t.equal(ES.BigIntBitwiseOp('|', BigInt(1), BigInt(2)), BigInt(1) | BigInt(2));
-		t.equal(ES.BigIntBitwiseOp('^', BigInt(1), BigInt(2)), BigInt(1) ^ BigInt(2));
+		t.test('BigInt support', { skip: !hasBigInts }, function (st) {
+			st['throws'](
+				function () { ES.BigIntBitwiseOp('&', 1, BigInt(1)); },
+				TypeError,
+				'x: 1 is not a BigInt'
+			);
+			st['throws'](
+				function () { ES.BigIntBitwiseOp('&', BigInt(1), 1); },
+				TypeError,
+				'y: 1 is not a BigInt'
+			);
+
+			st['throws'](
+				function () { ES.BigIntBitwiseOp('invalid', BigInt(0), BigInt(0)); },
+				TypeError,
+				'throws with an invalid op'
+			);
+
+			st.equal(ES.BigIntBitwiseOp('&', BigInt(1), BigInt(2)), BigInt(1) & BigInt(2));
+			st.equal(ES.BigIntBitwiseOp('|', BigInt(1), BigInt(2)), BigInt(1) | BigInt(2));
+			st.equal(ES.BigIntBitwiseOp('^', BigInt(1), BigInt(2)), BigInt(1) ^ BigInt(2));
+
+			st.end();
+		});
 
 		t.end();
 	});
@@ -6250,6 +8218,14 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 	});
 
 	test('CodePointAt', function (t) {
+		forEach(v.nonStrings, function (nonString) {
+			t['throws'](
+				function () { ES.CodePointAt(nonString, 0); },
+				TypeError,
+				debug(nonString) + ' is not a String'
+			);
+		});
+
 		t['throws'](
 			function () { ES.CodePointAt('abc', -1); },
 			TypeError,
@@ -6414,6 +8390,16 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 		t.end();
 	});
 
+	test('CreateListFromArrayLike', { skip: !hasBigInts }, function (t) {
+		t.deepEqual(
+			ES.CreateListFromArrayLike({ length: 2, 0: BigInt(1), 1: 'b', 2: 'c' }),
+			[BigInt(1), 'b'],
+			'arraylike (with BigInt) stops at the length'
+		);
+
+		t.end();
+	});
+
 	test('CreateRegExpStringIterator', function (t) {
 		forEach(v.nonStrings, function (nonString) {
 			t['throws'](
@@ -6436,6 +8422,20 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 				debug(nonBoolean) + ' is not a String (`fullUnicode`)'
 			);
 		});
+
+		var resIterator = ES.CreateRegExpStringIterator(/a/, 'a', false, false);
+		forEach(v.primitives, function (nonObject) {
+			t['throws'](
+				function () { resIterator.next.call(nonObject); },
+				TypeError,
+				debug(nonObject) + ', receiver of iterator next, is not an Object'
+			);
+		});
+		t['throws'](
+			function () { resIterator.next.call({}); },
+			TypeError,
+			'iterator next receiver is not a RegExp String Iterator'
+		);
 
 		t.test('`global` matches `g` flag', function (st) {
 			st.test('non-global regex', function (s2t) {
@@ -6466,6 +8466,17 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 					assign(['a'], kludgeMatch(regex, { index: 3, input: str, lastIndex: 4 }))
 				];
 				testRESIterator(ES, s2t, regex, str, true, false, expected);
+
+				var emptyRegex = /(?:)/g;
+				var abc = 'abc';
+				var expected2 = [
+					assign([''], kludgeMatch(emptyRegex, { index: 0, input: abc, lastIndex: 1 })),
+					assign([''], kludgeMatch(emptyRegex, { index: 1, input: abc, lastIndex: 2 })),
+					assign([''], kludgeMatch(emptyRegex, { index: 2, input: abc, lastIndex: 3 })),
+					assign([''], kludgeMatch(emptyRegex, { index: 3, input: abc, lastIndex: 4 }))
+				];
+				testRESIterator(ES, s2t, emptyRegex, abc, true, false, expected2);
+
 				s2t.end();
 			});
 
@@ -6537,6 +8548,17 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 				t.fail(debug(key) + ' should not be an enumerable key');
 			}
 		}
+		if (v.hasSymbols) {
+			t.equal(iterator[Symbol.iterator](), iterator, 'is iterable for itself');
+		}
+
+		t.end();
+	});
+
+	test('floor (with BigInts)', { skip: !hasBigInts }, function (t) {
+		t.equal(ES.floor(BigInt(3)), BigInt(3), 'floor(3n) is 3n');
+		t.equal(ES.floor(BigInt(-3)), BigInt(-3), 'floor(-3n) is -3n');
+		t.equal(ES.floor(BigInt(0)), BigInt(0), 'floor(0n) is 0n');
 
 		t.end();
 	});
@@ -6563,6 +8585,16 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 			st.end();
 		});
 
+		t.test('no Symbol.asyncIterator', { skip: v.hasAsyncIterator }, function (st) {
+			st['throws'](
+				function () { ES.GetIterator(arr, 'async'); },
+				SyntaxError,
+				'async from sync iterators are not currently supported'
+			);
+
+			st.end();
+		});
+
 		t.test('Symbol.asyncIterator', { skip: !v.hasSymbols || !Symbol.asyncIterator }, function (st) {
 			try {
 				ES.GetIterator(arr, 'async');
@@ -6583,6 +8615,19 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 			};
 
 			st.equal(ES.GetIterator(obj, 'async'), it);
+
+			forEach(v.primitives, function (primitive) {
+				var badObj = {};
+				badObj[Symbol.asyncIterator] = function () {
+					return primitive;
+				};
+
+				st['throws'](
+					function () { ES.GetIterator(badObj, 'async'); },
+					TypeError,
+					debug(primitive) + ' is not an Object'
+				);
+			});
 
 			st.end();
 		});
@@ -7384,6 +9429,493 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 			st.end();
 		});
 
+		t.test('no BigInts', { skip: hasBigInts }, function (st) {
+			st['throws'](
+				function () { ES.NumberToBigInt(0); },
+				SyntaxError,
+				'BigInt is not supported on this engine'
+			);
+
+			st.end();
+		});
+
+		t.end();
+	});
+
+	test('NumericToRawBytes', function (t) {
+		forEach(v.nonStrings.concat('', 'Byte'), function (nonTAType) {
+			t['throws'](
+				function () { ES.NumericToRawBytes(nonTAType, 0, false); },
+				TypeError,
+				debug(nonTAType) + ' is not a String, or not a TypedArray type'
+			);
+		});
+
+		forEach(v.nonNumbers, function (nonNumber) {
+			t['throws'](
+				function () { ES.NumericToRawBytes('Int8', nonNumber, false); },
+				TypeError,
+				debug(nonNumber) + ' is not a Number'
+			);
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.NumericToRawBytes('Int8', 0, nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		t.test('Float32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[-0, [0, 0, 0, 128]],
+				[1, [0, 0, 128, 63]],
+				[0.75, [0, 0, 64, 63]],
+				[0.5, [0, 0, 0, 63]],
+				[-1.5, [0, 0, 192, 191]],
+				[-3.5, [0, 0, 96, 192]],
+				[16777216, [0, 0, 128, 75]], // max safe float32
+				[2147483648, [0, 0, 0, 79]], // 2147483647 isn't representable as a float32
+				[Infinity, [0, 0, 128, 127]],
+				[-Infinity, [0, 0, 128, 255]],
+				[NaN, [0, 0, 192, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float32Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Float32', float, true),
+					bytes,
+					'little-endian: ' + debug(float) + ' produces bytes for it'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Float32', float, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(float) + ' produces bytes for it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Float64', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0, 0, 0, 0, 0]],
+				[-0, [0, 0, 0, 0, 0, 0, 0, 128]],
+				[1, [0, 0, 0, 0, 0, 0, 240, 63]],
+				[0.75, [0, 0, 0, 0, 0, 0, 232, 63]],
+				[0.5, [0, 0, 0, 0, 0, 0, 224, 63]],
+				[-1.5, [0, 0, 0, 0, 0, 0, 248, 191]],
+				[-3.5, [0, 0, 0, 0, 0, 0, 12, 192]],
+				[2147483647, [0, 0, 192, 255, 255, 255, 223, 65]],
+				[9007199254740992, [0, 0, 0, 0, 0, 0, 64, 67]],
+				[Infinity, [0, 0, 0, 0, 0, 0, 240, 127]],
+				[-Infinity, [0, 0, 0, 0, 0, 0, 240, 255]],
+				[NaN, [0, 0, 0, 0, 0, 0, 248, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float64Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Float64', float, true),
+					bytes,
+					'little-endian: ' + debug(float) + ' produces bytes for it'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Float64', float, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(float) + ' produces bytes for it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int8', function (st) {
+			forEach([
+				[0, [0]],
+				[-1, [255]],
+				[1, [1]],
+				[127, [127]],
+				[-127, [129]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int8Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Int8', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Int8', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8', function (st) {
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint8', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint8', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8C', function (st) {
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint8ClampedArray(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint8C', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint8C', int, false),
+					bytes,
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int16', function (st) {
+			forEach([
+				[0, [0, 0]],
+				[-1, [255, 255]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[-127, [129, 255]],
+				[255, [255, 0]],
+				[-255, [1, 255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Int16', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Int16', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint16', function (st) {
+			forEach([
+				[0, [0, 0]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[255, [255, 0]],
+				[256, [0, 1]],
+				[511, [255, 1]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint16', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint16', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[-1, [255, 255, 255, 255]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Int32', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Int32', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint32', function (st) {
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint32', int, true),
+					bytes,
+					'little-endian: ' + debug(int) + ' produces expected bytes'
+				);
+				st.deepEqual(
+					ES.NumericToRawBytes('Uint32', int, false),
+					bytes.slice().reverse(),
+					'big-endian: ' + debug(int) + ' produces expected bytes'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('BigInt64', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with less than 8 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with more than 8 bytes throws a RangeError'
+			);
+
+			st.test('bigints available', { skip: !hasBigInts }, function (s2t) {
+				forEach([
+					[BigInt(0), [0, 0, 0, 0, 0, 0, 0, 0]],
+					[BigInt(1), [1, 0, 0, 0, 0, 0, 0, 0]],
+					// [BigInt(-1), [255, 255, 255, 255, 255, 255, 255, 255]],
+					[BigInt(16777216), [0, 0, 0, 1, 0, 0, 0, 0]], // max safe float32
+					[BigInt(2147483647), [255, 255, 255, 127, 0, 0, 0, 0]],
+					// [BigInt(-2147483647), [1, 0, 0, 128, 255, 255, 255, 255]],
+					[BigInt(2147483648), [0, 0, 0, 128, 0, 0, 0, 0]]
+					// [BigInt(-2147483648), [0, 0, 0, 128, 255, 255, 255, 255]]
+				], function (pair) {
+					var int = pair[0];
+					var bytes = pair[1];
+
+					if (availableTypedArrays.length > 0) {
+						var expectedBytes = arrayFrom(new Uint8Array(assign(new BigInt64Array(1), [int]).buffer));
+						s2t.deepEqual(
+							bytes,
+							expectedBytes,
+							'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+						);
+					}
+
+					s2t.equal(
+						ES.RawBytesToNumeric('BigInt64', bytes, true),
+						int,
+						'little-endian: bytes for ' + debug(int) + ' produces it'
+					);
+					s2t.equal(
+						ES.RawBytesToNumeric('BigInt64', bytes.slice().reverse(), false),
+						int,
+						'big-endian: bytes for ' + debug(int) + ' produces it'
+					);
+				});
+
+				s2t.end();
+			});
+
+			st.test('no bigints', { skip: hasBigInts }, function (s2t) {
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigInt64 throws a SyntaxError when BigInt is not available'
+				);
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigUint64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigUint64 throws a SyntaxError when BigInt is not available'
+				);
+
+				s2t.end();
+			});
+
+			st.end();
+		});
+
+		t.test('BigUint64', function (st) {
+			st.test('bigints available', { skip: !hasBigInts }, function (s2t) {
+				forEach([
+					[BigInt(0), [0, 0, 0, 0, 0, 0, 0, 0]],
+					[BigInt(1), [1, 0, 0, 0, 0, 0, 0, 0]],
+					// [BigInt(-1), [255, 255, 255, 255, 255, 255, 255, 255]],
+					[BigInt(16777216), [0, 0, 0, 1, 0, 0, 0, 0]], // max safe float32
+					[BigInt(2147483647), [255, 255, 255, 127, 0, 0, 0, 0]],
+					// [BigInt(-2147483647), [1, 0, 0, 128, 255, 255, 255, 255]],
+					[BigInt(2147483648), [0, 0, 0, 128, 0, 0, 0, 0]]
+					// [BigInt(-2147483648), [0, 0, 0, 128, 255, 255, 255, 255]]
+				], function (pair) {
+					var int = pair[0];
+					var bytes = pair[1];
+
+					if (availableTypedArrays.length > 0) {
+						var expectedBytes = arrayFrom(new Uint8Array(assign(new BigUint64Array(1), [int]).buffer));
+						s2t.deepEqual(
+							bytes,
+							expectedBytes,
+							'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+						);
+					}
+
+					s2t.deepEqual(
+						ES.NumericToRawBytes('BigUint64', int, true),
+						bytes,
+						'little-endian: bytes for ' + debug(int) + ' are produced'
+					);
+					s2t.deepEqual(
+						ES.NumericToRawBytes('BigUint64', int, false),
+						bytes.slice().reverse(),
+						'big-endian: bytes for ' + debug(int) + ' are produced'
+					);
+				});
+
+				s2t.end();
+			});
+
+			st.test('no bigints', { skip: hasBigInts }, function (s2t) {
+				s2t['throws'](
+					function () { ES.NumericToRawBytes('BigUint64', 0, false); },
+					SyntaxError,
+					'BigUint64 throws a SyntaxError when BigInt is not available'
+				);
+				s2t['throws'](
+					function () { ES.NumericToRawBytes('BigUint64', 0, false); },
+					SyntaxError,
+					'BigUint64 throws a SyntaxError when BigInt is not available'
+				);
+
+				s2t.end();
+			});
+
+			st.end();
+		});
+
 		t.end();
 	});
 
@@ -7393,6 +9925,14 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 				function () { ES.OrdinaryObjectCreate(value); },
 				TypeError,
 				debug(value) + ' is not null, or an object'
+			);
+		});
+
+		forEach(v.nonArrays, function (nonArray) {
+			t['throws'](
+				function () { ES.OrdinaryObjectCreate({}, nonArray); },
+				TypeError,
+				debug(nonArray) + ' is not an Array'
 			);
 		});
 
@@ -7409,10 +9949,18 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 		t.test('internal slots arg', function (st) {
 			st.doesNotThrow(function () { ES.OrdinaryObjectCreate({}, []); }, 'an empty slot list is valid');
 
+			var O = ES.OrdinaryObjectCreate({}, ['a', 'b']);
+			st.doesNotThrow(
+				function () {
+					SLOT.assert(O, 'a');
+					SLOT.assert(O, 'b');
+				},
+				'expected internal slots exist'
+			);
 			st['throws'](
-				function () { ES.OrdinaryObjectCreate({}, ['a']); },
-				SyntaxError,
-				'internal slots are not supported'
+				function () { SLOT.assert(O, 'c'); },
+				TypeError,
+				'internal slots that should not exist throw'
 			);
 
 			st.end();
@@ -7431,6 +9979,600 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 				SyntaxError,
 				'without a native Object.create, can not create null objects'
 			);
+
+			st.end();
+		});
+
+		t.end();
+	});
+
+	test('RawBytesToNumeric', function (t) {
+		forEach(v.nonStrings.concat('', 'Byte'), function (nonTAType) {
+			t['throws'](
+				function () { ES.RawBytesToNumeric(nonTAType, [], false); },
+				TypeError,
+				debug(nonTAType) + ' is not a String, or not a TypedArray type'
+			);
+		});
+
+		forEach(v.primitives.concat(v.objects), function (nonArray) {
+			t['throws'](
+				function () { ES.RawBytesToNumeric('Int8', nonArray, false); },
+				TypeError,
+				debug(nonArray) + ' is not an Array'
+			);
+		});
+		forEach([-1, 1.5, 256], function (nonByte) {
+			t['throws'](
+				function () { ES.RawBytesToNumeric('Int8', [nonByte], false); },
+				TypeError,
+				debug(nonByte) + ' is not a valid "byte"'
+			);
+		});
+
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.RawBytesToNumeric('Int8', [0], nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		t.test('Float32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Float32', [0, 0, 0], false); },
+				RangeError,
+				'Float32 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Float32', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float32 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[-0, [0, 0, 0, 128]],
+				[1, [0, 0, 128, 63]],
+				[0.75, [0, 0, 64, 63]],
+				[0.5, [0, 0, 0, 63]],
+				[-1.5, [0, 0, 192, 191]],
+				[-3.5, [0, 0, 96, 192]],
+				[16777216, [0, 0, 128, 75]], // max safe float32
+				[2147483648, [0, 0, 0, 79]], // 2147483647 isn't representable as a float32
+				[Infinity, [0, 0, 128, 127]],
+				[-Infinity, [0, 0, 128, 255]],
+				[NaN, [0, 0, 192, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float32Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Float32', bytes, true),
+					float,
+					'little-endian: bytes for ' + debug(float) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Float32', bytes.slice().reverse(), false),
+					float,
+					'big-endian: bytes for ' + debug(float) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Float64', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Float64', [0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float64 with less than 8 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Float64', [0, 0, 0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Float64 with more than 8 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0, 0, 0, 0, 0]],
+				[-0, [0, 0, 0, 0, 0, 0, 0, 128]],
+				[1, [0, 0, 0, 0, 0, 0, 240, 63]],
+				[0.75, [0, 0, 0, 0, 0, 0, 232, 63]],
+				[0.5, [0, 0, 0, 0, 0, 0, 224, 63]],
+				[-1.5, [0, 0, 0, 0, 0, 0, 248, 191]],
+				[-3.5, [0, 0, 0, 0, 0, 0, 12, 192]],
+				[2147483647, [0, 0, 192, 255, 255, 255, 223, 65]],
+				[9007199254740992, [0, 0, 0, 0, 0, 0, 64, 67]],
+				[Infinity, [0, 0, 0, 0, 0, 0, 240, 127]],
+				[-Infinity, [0, 0, 0, 0, 0, 0, 240, 255]],
+				[NaN, [0, 0, 0, 0, 0, 0, 248, 127]]
+			], function (pair) {
+				var float = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Float64Array(1), [float]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(float) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Float64', bytes, true),
+					float,
+					'little-endian: bytes for ' + debug(float) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Float64', bytes.slice().reverse(), false),
+					float,
+					'big-endian: bytes for ' + debug(float) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int8', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Int8', [], false); },
+				RangeError,
+				'Int8 with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Int8', [0, 0], false); },
+				RangeError,
+				'Int8 with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[-1, [255]],
+				[1, [1]],
+				[127, [127]],
+				[-127, [129]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int8Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Int8', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Int8', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint8', [], false); },
+				RangeError,
+				'Uint8 with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint8', [0, 0], false); },
+				RangeError,
+				'Uint8 with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				st.equal(
+					ES.RawBytesToNumeric('Uint8', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Uint8', bytes, false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint8C', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint8C', [], false); },
+				RangeError,
+				'Uint8C with less than 1 byte throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint8C', [0, 0], false); },
+				RangeError,
+				'Uint8C with more than 1 byte throws a RangeError'
+			);
+
+			forEach([
+				[0, [0]],
+				[1, [1]],
+				[127, [127]],
+				[255, [255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint8ClampedArray(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Uint8C', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Uint8C', bytes, false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int16', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Int16', [0], false); },
+				RangeError,
+				'Int16 with less than 2 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint8C', [0, 0, 0], false); },
+				RangeError,
+				'Int16 with more than 2 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0]],
+				[-1, [255, 255]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[-127, [129, 255]],
+				[255, [255, 0]],
+				[-255, [1, 255]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Int16', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Int16', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint16', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint16', [0], false); },
+				RangeError,
+				'Uint16 with less than 2 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint16', [0, 0, 0], false); },
+				RangeError,
+				'Uint16 with more than 2 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0]],
+				[1, [1, 0]],
+				[127, [127, 0]],
+				[255, [255, 0]],
+				[256, [0, 1]],
+				[511, [255, 1]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint16Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Uint16', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Uint16', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Int32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint16', [0, 0, 0], false); },
+				RangeError,
+				'Uint16 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint16', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Uint16 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[-1, [255, 255, 255, 255]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Int32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Int32', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Int32', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('Uint32', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint32', [0, 0, 0], false); },
+				RangeError,
+				'Uint32 with less than 4 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('Uint32', [0, 0, 0, 0, 0], false); },
+				RangeError,
+				'Uint32 with more than 4 bytes throws a RangeError'
+			);
+
+			forEach([
+				[0, [0, 0, 0, 0]],
+				[1, [1, 0, 0, 0]],
+				[16777216, [0, 0, 0, 1]], // max safe float32
+				[2147483647, [255, 255, 255, 127]],
+				[-2147483647, [1, 0, 0, 128]],
+				[-2147483648, [0, 0, 0, 128]]
+			], function (pair) {
+				var int = pair[0];
+				var bytes = pair[1];
+
+				if (availableTypedArrays.length > 0) {
+					var expectedBytes = arrayFrom(new Uint8Array(assign(new Uint32Array(1), [int]).buffer));
+					st.deepEqual(
+						bytes,
+						expectedBytes,
+						'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+					);
+				}
+
+				st.equal(
+					ES.RawBytesToNumeric('Uint32', bytes, true),
+					int,
+					'little-endian: bytes for ' + debug(int) + ' produces it'
+				);
+				st.equal(
+					ES.RawBytesToNumeric('Uint32', bytes.slice().reverse(), false),
+					int,
+					'big-endian: bytes for ' + debug(int) + ' produces it'
+				);
+			});
+
+			st.end();
+		});
+
+		t.test('BigInt64', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with less than 8 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with more than 8 bytes throws a RangeError'
+			);
+
+			st.test('bigints available', { skip: !hasBigInts }, function (s2t) {
+				forEach([
+					[BigInt(0), [0, 0, 0, 0, 0, 0, 0, 0]],
+					[BigInt(1), [1, 0, 0, 0, 0, 0, 0, 0]],
+					// [BigInt(-1), [255, 255, 255, 255, 255, 255, 255, 255]],
+					[BigInt(16777216), [0, 0, 0, 1, 0, 0, 0, 0]], // max safe float32
+					[BigInt(2147483647), [255, 255, 255, 127, 0, 0, 0, 0]],
+					// [BigInt(-2147483647), [1, 0, 0, 128, 255, 255, 255, 255]],
+					[BigInt(2147483648), [0, 0, 0, 128, 0, 0, 0, 0]]
+					// [BigInt(-2147483648), [0, 0, 0, 128, 255, 255, 255, 255]]
+				], function (pair) {
+					var int = pair[0];
+					var bytes = pair[1];
+
+					if (availableTypedArrays.length > 0) {
+						var expectedBytes = arrayFrom(new Uint8Array(assign(new BigInt64Array(1), [int]).buffer));
+						s2t.deepEqual(
+							bytes,
+							expectedBytes,
+							'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+						);
+					}
+
+					s2t.equal(
+						ES.RawBytesToNumeric('BigInt64', bytes, true),
+						int,
+						'little-endian: bytes for ' + debug(int) + ' produces it'
+					);
+					s2t.equal(
+						ES.RawBytesToNumeric('BigInt64', bytes.slice().reverse(), false),
+						int,
+						'big-endian: bytes for ' + debug(int) + ' produces it'
+					);
+				});
+
+				s2t.end();
+			});
+
+			st.test('no bigints', { skip: hasBigInts }, function (s2t) {
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigInt64 throws a SyntaxError when BigInt is not available'
+				);
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigUint64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigUint64 throws a SyntaxError when BigInt is not available'
+				);
+
+				s2t.end();
+			});
+
+			st.end();
+		});
+
+		t.test('BigUint64', function (st) {
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigUint64', [0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with less than 8 bytes throws a RangeError'
+			);
+			st['throws'](
+				function () { ES.RawBytesToNumeric('BigUint64', [0, 0, 0, 0, 0, 0, 0, 0, 0], false); },
+				RangeError,
+				'BigInt64 with more than 8 bytes throws a RangeError'
+			);
+
+			st.test('bigints available', { skip: !hasBigInts }, function (s2t) {
+				forEach([
+					[BigInt(0), [0, 0, 0, 0, 0, 0, 0, 0]],
+					[BigInt(1), [1, 0, 0, 0, 0, 0, 0, 0]],
+					// [BigInt(-1), [255, 255, 255, 255, 255, 255, 255, 255]],
+					[BigInt(16777216), [0, 0, 0, 1, 0, 0, 0, 0]], // max safe float32
+					[BigInt(2147483647), [255, 255, 255, 127, 0, 0, 0, 0]],
+					// [BigInt(-2147483647), [1, 0, 0, 128, 255, 255, 255, 255]],
+					[BigInt(2147483648), [0, 0, 0, 128, 0, 0, 0, 0]]
+					// [BigInt(-2147483648), [0, 0, 0, 128, 255, 255, 255, 255]]
+				], function (pair) {
+					var int = pair[0];
+					var bytes = pair[1];
+
+					if (availableTypedArrays.length > 0) {
+						var expectedBytes = arrayFrom(new Uint8Array(assign(new BigUint64Array(1), [int]).buffer));
+						s2t.deepEqual(
+							bytes,
+							expectedBytes,
+							'bytes for ' + debug(int) + ' are correct; got ' + debug(expectedBytes)
+						);
+					}
+
+					s2t.equal(
+						ES.RawBytesToNumeric('BigUint64', bytes, true),
+						int,
+						'little-endian: bytes for ' + debug(int) + ' produces it'
+					);
+					s2t.equal(
+						ES.RawBytesToNumeric('BigUint64', bytes.slice().reverse(), false),
+						int,
+						'big-endian: bytes for ' + debug(int) + ' produces it'
+					);
+				});
+
+				s2t.end();
+			});
+
+			st.test('no bigints', { skip: hasBigInts }, function (s2t) {
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigInt64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigInt64 throws a SyntaxError when BigInt is not available'
+				);
+				s2t['throws'](
+					function () { ES.RawBytesToNumeric('BigUint64', [0, 0, 0, 0, 0, 0, 0, 0], false); },
+					SyntaxError,
+					'BigUint64 throws a SyntaxError when BigInt is not available'
+				);
+
+				s2t.end();
+			});
 
 			st.end();
 		});
@@ -7494,6 +10636,19 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 				);
 			});
 
+			st.equal(ES.StringToBigInt(''), BigInt(0), 'empty string becomes 0n');
+			st.equal(ES.StringToBigInt('Infinity'), NaN, 'non-finite numeric string becomes NaN');
+
+			st.end();
+		});
+
+		test('BigInt not supported', { skip: hasBigInts }, function (st) {
+			st['throws'](
+				function () { ES.StringToBigInt('0'); },
+				SyntaxError,
+				'throws a SyntaxError when BigInt is not available'
+			);
+
 			st.end();
 		});
 
@@ -7509,6 +10664,14 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 	});
 
 	test('StringPad', function (t) {
+		t['throws'](
+			function () { ES.StringPad('', 0, '', 'not start or end'); },
+			TypeError,
+			'`placement` must be "start" or "end"'
+		);
+
+		t.equal(ES.StringPad('a', 3, '', 'start'), 'a');
+		t.equal(ES.StringPad('a', 3, '', 'end'), 'a');
 		t.equal(ES.StringPad('a', 3, undefined, 'start'), '  a');
 		t.equal(ES.StringPad('a', 3, undefined, 'end'), 'a  ');
 		t.equal(ES.StringPad('a', 3, '0', 'start'), '00a');
@@ -7655,13 +10818,14 @@ var es2020 = function ES2020(ES, ops, expectedMissing, skips) {
 
 	test('ToInteger', function (t) {
 		forEach([0, -0, NaN], function (num) {
-			t.equal(0, ES.ToInteger(num), debug(num) + ' returns +0');
+			t.equal(ES.ToInteger(num), +0, debug(num) + ' returns +0');
 		});
 		forEach([Infinity, 42], function (num) {
-			t.equal(num, ES.ToInteger(num), debug(num) + ' returns itself');
-			t.equal(-num, ES.ToInteger(-num), '-' + debug(num) + ' returns itself');
+			t.equal(ES.ToInteger(num), num, debug(num) + ' returns itself');
+			t.equal(ES.ToInteger(-num), -num, '-' + debug(num) + ' returns itself');
 		});
-		t.equal(3, ES.ToInteger(Math.PI), 'pi returns 3');
+		t.equal(ES.ToInteger(Math.PI), 3, 'pi returns 3');
+		t.equal(ES.ToInteger(-0.1), +0, '-0.1 truncates to +0, not -0');
 		t['throws'](function () { return ES.ToInteger(v.uncoercibleObject); }, TypeError, 'uncoercibleObject throws');
 		t.end();
 	});
@@ -7776,7 +10940,8 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 		ToInteger: true,
 		UTF16DecodeString: true,
 		UTF16DecodeSurrogatePair: true,
-		UTF16Encoding: true
+		UTF16Encoding: true,
+		ValidateAtomicAccess: true
 	}));
 	var test = makeTest(ES, skips);
 
@@ -7907,6 +11072,23 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 			);
 		});
 
+		t.test('BigInt support', { skip: !hasBigInts }, function (st) {
+			forEach(v.bigints, function (bigint) {
+				st['throws'](
+					function () { ES.ApplyStringOrNumericBinaryOperator(Number(bigint), '+', bigint); },
+					TypeError,
+					'Number and BigInt can not be added'
+				);
+				st['throws'](
+					function () { ES.ApplyStringOrNumericBinaryOperator(bigint, '+', Number(bigint)); },
+					TypeError,
+					'BigInt and Number can not be added'
+				);
+			});
+
+			st.end();
+		});
+
 		t.end();
 	});
 
@@ -7937,6 +11119,14 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 			'byte sequences must be the same length'
 		);
 
+		forEach([1.5, -1, 256], function (nonByte) {
+			t['throws'](
+				function () { ES.ByteListBitwiseOp('&', [nonByte], [1]); },
+				TypeError,
+				debug(nonByte) + ' is not a byte value'
+			);
+		});
+
 		for (var i = 0; i <= 255; i += 1) {
 			var j = i === 0 ? 1 : i - 1;
 			t.deepEqual(ES.ByteListBitwiseOp('&', [i], [j]), [i & j], i + ' & ' + j);
@@ -7963,6 +11153,14 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 		});
 
 		t.equal(ES.ByteListEqual([0], [0, 0]), false, 'two sequences of different length are not equal');
+
+		forEach([1.5, -1, 256], function (nonByte) {
+			t['throws'](
+				function () { ES.ByteListEqual([nonByte], [1]); },
+				TypeError,
+				debug(nonByte) + ' is not a byte value'
+			);
+		});
 
 		for (var i = 0; i <= 255; i += 1) {
 			t.equal(ES.ByteListEqual([i], [i]), true, 'two equal sequences of ' + i + ' are equal');
@@ -8149,13 +11347,14 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 
 	test('ToIntegerOrInfinity', function (t) {
 		forEach([0, -0, NaN], function (num) {
-			t.equal(0, ES.ToIntegerOrInfinity(num), debug(num) + ' returns +0');
+			t.equal(ES.ToIntegerOrInfinity(num), +0, debug(num) + ' returns +0');
 		});
 		forEach([Infinity, 42], function (num) {
-			t.equal(num, ES.ToIntegerOrInfinity(num), debug(num) + ' returns itself');
-			t.equal(-num, ES.ToIntegerOrInfinity(-num), '-' + debug(num) + ' returns itself');
+			t.equal(ES.ToIntegerOrInfinity(num), num, debug(num) + ' returns itself');
+			t.equal(ES.ToIntegerOrInfinity(-num), -num, '-' + debug(num) + ' returns itself');
 		});
-		t.equal(3, ES.ToIntegerOrInfinity(Math.PI), 'pi returns 3');
+		t.equal(ES.ToIntegerOrInfinity(Math.PI), 3, 'pi returns 3');
+		t.equal(ES.ToIntegerOrInfinity(-0.1), +0, '-0.1 truncates to +0, not -0');
 		t['throws'](function () { return ES.ToIntegerOrInfinity(v.uncoercibleObject); }, TypeError, 'uncoercibleObject throws');
 		t.end();
 	});
@@ -8323,6 +11522,127 @@ var es2021 = function ES2021(ES, ops, expectedMissing, skips) {
 
 		t.equal(ES.UTF16EncodeCodePoint(0xd83d), leadingPoo.charAt(0), '0xD83D is the first half of ' + wholePoo);
 		t.equal(ES.UTF16EncodeCodePoint(0xdca9), trailingPoo.charAt(0), '0xD83D is the last half of ' + wholePoo);
+		t.equal(ES.UTF16EncodeCodePoint(0x10000), '𐀀', '0x10000 is "𐀀"');
+
+		t.end();
+	});
+
+	test('ValidateAtomicAccess', function (t) {
+		forEach(v.primitives.concat(v.objects, [[]]), function (nonTA) {
+			t['throws'](
+				function () { ES.ValidateAtomicAccess(nonTA, 0); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		t.test('actual typed arrays', { skip: availableTypedArrays.length === 0 }, function (st) {
+			forEach(availableTypedArrays, function (TypedArray) {
+				var ta = new global[TypedArray](8);
+
+				st.doesNotThrow(
+					function () { ES.ValidateAtomicAccess(ta, 0); },
+					debug(ta) + ' is an integer TypedArray'
+				);
+
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, -1); },
+					RangeError, // via ToIndex
+					'a requestIndex of -1 is <= 0'
+				);
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, 8); },
+					RangeError,
+					'a requestIndex === length throws'
+				);
+				st['throws'](
+					function () { ES.ValidateAtomicAccess(ta, 9); },
+					RangeError,
+					'a requestIndex > length throws'
+				);
+
+				var elementSize = {
+					__proto__: null,
+					$Int8Array: 1,
+					$Uint8Array: 1,
+					$Uint8ClampedArray: 1,
+					$Int16Array: 2,
+					$Uint16Array: 2,
+					$Int32Array: 4,
+					$Uint32Array: 4,
+					$BigInt64Array: 8,
+					$BigUint64Array: 8,
+					$Float32Array: 4,
+					$Float64Array: 8
+				}['$' + TypedArray];
+
+				st.equal(ES.ValidateAtomicAccess(ta, 0), 0, TypedArray + ': requestIndex of 0 gives 0');
+				st.equal(ES.ValidateAtomicAccess(ta, 1), elementSize * 1, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 1));
+				st.equal(ES.ValidateAtomicAccess(ta, 2), elementSize * 2, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 2));
+				st.equal(ES.ValidateAtomicAccess(ta, 3), elementSize * 3, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 3));
+				st.equal(ES.ValidateAtomicAccess(ta, 4), elementSize * 4, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 4));
+				st.equal(ES.ValidateAtomicAccess(ta, 5), elementSize * 5, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 5));
+				st.equal(ES.ValidateAtomicAccess(ta, 6), elementSize * 6, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 6));
+				st.equal(ES.ValidateAtomicAccess(ta, 7), elementSize * 7, TypedArray + ': requestIndex of 1 gives ' + (elementSize * 7));
+			});
+
+			st.end();
+		});
+
+		t.end();
+	});
+
+	test('ValidateIntegerTypedArray', function (t) {
+		forEach(v.nonBooleans, function (nonBoolean) {
+			t['throws'](
+				function () { ES.ValidateIntegerTypedArray(null, nonBoolean); },
+				TypeError,
+				debug(nonBoolean) + ' is not a Boolean'
+			);
+		});
+
+		forEach(v.primitives.concat(v.objects, [[]]), function (nonTA) {
+			t['throws'](
+				function () { ES.ValidateIntegerTypedArray(nonTA); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		t.test('actual typed arrays', { skip: availableTypedArrays.length === 0 }, function (st) {
+			forEach(availableTypedArrays, function (TypedArray) {
+				var ta = new global[TypedArray](0);
+				var shouldThrow = TypedArray.indexOf('Clamped') > -1 || !(/Int|Uint/).test(TypedArray);
+				if (shouldThrow) {
+					st['throws'](
+						function () { ES.ValidateIntegerTypedArray(ta); },
+						TypeError,
+						debug(ta) + ' is not an integer TypedArray'
+					);
+				} else {
+					st.doesNotThrow(
+						function () { ES.ValidateIntegerTypedArray(ta); },
+						debug(ta) + ' is an integer TypedArray'
+					);
+				}
+
+				var isWaitable = TypedArray === 'Int32Array' || TypedArray === 'BigInt64Array';
+				if (isWaitable) {
+					st.doesNotThrow(
+						function () { ES.ValidateIntegerTypedArray(ta, true); },
+						debug(ta) + ' is a waitable integer TypedArray'
+					);
+				} else {
+					st['throws'](
+						function () { ES.ValidateIntegerTypedArray(ta, true); },
+						TypeError,
+						debug(ta) + ' is not a waitable integer TypedArray'
+					);
+				}
+			});
+
+			st.end();
+		});
 
 		t.end();
 	});
@@ -8354,7 +11674,8 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 		'Abstract Equality Comparison': true,
 		'Abstract Relational Comparison': true,
 		'Strict Equality Comparison': true,
-		SplitMatch: true
+		SplitMatch: true,
+		StringToBigInt: true
 	}));
 
 	var test = makeTest(ES, skips);
@@ -8437,8 +11758,7 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 			v.objects,
 			{ '[[StartIndex]]': -1 },
 			{ '[[StartIndex]]': 1.2, '[[EndIndex]]': 0 },
-			{ '[[StartIndex]]': 1, '[[EndIndex]]': 0 },
-			{ '[[StartIndex]]': 0, '[[EndIndex]]': 1 }
+			{ '[[StartIndex]]': 1, '[[EndIndex]]': 0 }
 		), function (notMatchRecord) {
 			t['throws'](
 				function () { return ES.GetMatchIndexPair('', notMatchRecord); },
@@ -8446,6 +11766,20 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 				debug(notMatchRecord) + ' is not a Match Record'
 			);
 		});
+
+		var invalidStart = { '[[StartIndex]]': 1, '[[EndIndex]]': 2 };
+		t['throws'](
+			function () { return ES.GetMatchIndexPair('', invalidStart); },
+			TypeError,
+			debug(invalidStart) + ' has a [[StartIndex]] that is > the length of the string'
+		);
+
+		var invalidEnd = { '[[StartIndex]]': 0, '[[EndIndex]]': 1 };
+		t['throws'](
+			function () { return ES.GetMatchIndexPair('', invalidEnd); },
+			TypeError,
+			debug(invalidEnd) + ' has an [[EndIndex]] that is > the length of the string'
+		);
 
 		t.deepEqual(
 			ES.GetMatchIndexPair('', { '[[StartIndex]]': 0, '[[EndIndex]]': 0 }),
@@ -8472,8 +11806,7 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 			v.objects,
 			{ '[[StartIndex]]': -1 },
 			{ '[[StartIndex]]': 1.2, '[[EndIndex]]': 0 },
-			{ '[[StartIndex]]': 1, '[[EndIndex]]': 0 },
-			{ '[[StartIndex]]': 0, '[[EndIndex]]': 1 }
+			{ '[[StartIndex]]': 1, '[[EndIndex]]': 0 }
 		), function (notMatchRecord) {
 			t['throws'](
 				function () { return ES.GetMatchString('', notMatchRecord); },
@@ -8481,6 +11814,20 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 				debug(notMatchRecord) + ' is not a Match Record'
 			);
 		});
+
+		var invalidStart = { '[[StartIndex]]': 1, '[[EndIndex]]': 2 };
+		t['throws'](
+			function () { return ES.GetMatchString('', invalidStart); },
+			TypeError,
+			debug(invalidStart) + ' has a [[StartIndex]] that is > the length of the string'
+		);
+
+		var invalidEnd = { '[[StartIndex]]': 0, '[[EndIndex]]': 1 };
+		t['throws'](
+			function () { return ES.GetMatchString('', invalidEnd); },
+			TypeError,
+			debug(invalidEnd) + ' has an [[EndIndex]] that is > the length of the string'
+		);
 
 		t.equal(
 			ES.GetMatchString('', { '[[StartIndex]]': 0, '[[EndIndex]]': 0 }),
@@ -8517,13 +11864,16 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 		t.equal(ES.GetStringIndex(strWithWholePoo, 2), 3, 'index 2 yields 3');
 		t.equal(ES.GetStringIndex(strWithWholePoo, 3), 4, 'index 3 yields 4');
 
+		t.equal(ES.GetStringIndex('', 0), 0, 'index 0 yields 0 on empty string');
+		t.equal(ES.GetStringIndex('', 1), 0, 'index 1 yields 0 on empty string');
+
 		t.end();
 	});
 
 	test('InstallErrorCause', function (t) {
 		forEach(v.primitives, function (primitive) {
 			t['throws'](
-				function () { ES.CreateNonEnumerableDataPropertyOrThrow(primitive, 'key'); },
+				function () { ES.InstallErrorCause(primitive); },
 				TypeError,
 				'O must be an Object; ' + debug(primitive) + ' is not one'
 			);
@@ -8621,7 +11971,20 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 				[Number(String(v.coercibleObject)), v.coercibleObject],
 				[Number(v.coercibleObject), v.coercibleObject],
 				[String(Number(v.coercibleObject)), v.coercibleObject]
-			];
+			].concat(hasBigInts ? [
+				[BigInt(0), 0],
+				[0, BigInt(0)],
+				[BigInt(1), 1],
+				[1, BigInt(1)],
+				[BigInt(0), '0'],
+				['0', BigInt(0)],
+				[BigInt(1), '1'],
+				['1', BigInt(1)],
+				[BigInt(0), Infinity],
+				[Infinity, BigInt(0)],
+				[BigInt(0), 'Infinity'],
+				['Infinity', BigInt(0)]
+			] : []);
 			forEach(pairs, function (pair) {
 				var a = pair[0];
 				var b = pair[1];
@@ -8697,6 +12060,45 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 		t.equal(ES.IsLessThan(v.coercibleObject, '3', false), false, '!LeftFirst: coercible object is not less than "3"');
 		t.equal(ES.IsLessThan('3', v.coercibleObject, false), false, '!LeftFirst: "3" is not less than coercible object');
 
+		t.test('BigInts are supported', { skip: !hasBigInts }, function (st) {
+			st.equal(ES.IsLessThan($BigInt(0), '1', true), true, 'LeftFirst: 0n is less than "1"');
+			st.equal(ES.IsLessThan('1', $BigInt(0), true), false, 'LeftFirst: "1" is not less than 0n');
+			st.equal(ES.IsLessThan($BigInt(0), '1', false), true, '!LeftFirst: 0n is less than "1"');
+			st.equal(ES.IsLessThan('1', $BigInt(0), false), false, '!LeftFirst: "1" is not less than 0n');
+
+			st.equal(ES.IsLessThan($BigInt(0), 1, true), true, 'LeftFirst: 0n is less than 1');
+			st.equal(ES.IsLessThan(1, $BigInt(0), true), false, 'LeftFirst: 1 is not less than 0n');
+			st.equal(ES.IsLessThan($BigInt(0), 1, false), true, '!LeftFirst: 0n is less than 1');
+			st.equal(ES.IsLessThan(1, $BigInt(0), false), false, '!LeftFirst: 1 is not less than 0n');
+
+			st.equal(ES.IsLessThan($BigInt(0), $BigInt(1), true), true, 'LeftFirst: 0n is less than 1n');
+			st.equal(ES.IsLessThan($BigInt(1), $BigInt(0), true), false, 'LeftFirst: 1n is not less than 0n');
+			st.equal(ES.IsLessThan($BigInt(0), $BigInt(1), false), true, '!LeftFirst: 0n is less than 1n');
+			st.equal(ES.IsLessThan($BigInt(1), $BigInt(0), false), false, '!LeftFirst: 1n is not less than 0n');
+
+			st.equal(ES.IsLessThan($BigInt(0), 'NaN', true), undefined, 'LeftFirst: 0n and "NaN" produce `undefined`');
+			st.equal(ES.IsLessThan('NaN', $BigInt(0), true), undefined, 'LeftFirst: "NaN" and 0n produce `undefined`');
+			st.equal(ES.IsLessThan($BigInt(0), 'NaN', false), undefined, '!LeftFirst: 0n and "NaN" produce `undefined`');
+			st.equal(ES.IsLessThan('NaN', $BigInt(0), false), undefined, '!LeftFirst: "NaN" and 0n produce `undefined`');
+
+			st.equal(ES.IsLessThan($BigInt(0), NaN, true), undefined, 'LeftFirst: 0n and NaN produce `undefined`');
+			st.equal(ES.IsLessThan(NaN, $BigInt(0), true), undefined, 'LeftFirst: NaN and 0n produce `undefined`');
+			st.equal(ES.IsLessThan($BigInt(0), NaN, false), undefined, '!LeftFirst: 0n and NaN produce `undefined`');
+			st.equal(ES.IsLessThan(NaN, $BigInt(0), false), undefined, '!LeftFirst: NaN and 0n produce `undefined`');
+
+			st.equal(ES.IsLessThan($BigInt(0), Infinity, true), true, 'LeftFirst: 0n is less than Infinity');
+			st.equal(ES.IsLessThan(Infinity, $BigInt(0), true), false, 'LeftFirst: Infinity is not less than 0n');
+			st.equal(ES.IsLessThan($BigInt(0), Infinity, false), true, '!LeftFirst: 0n is less than Infinity');
+			st.equal(ES.IsLessThan(Infinity, $BigInt(0), false), false, '!LeftFirst: Infinity is not less than 0n');
+
+			st.equal(ES.IsLessThan($BigInt(0), -Infinity, true), false, 'LeftFirst: 0n is not less than -Infinity');
+			st.equal(ES.IsLessThan(-Infinity, $BigInt(0), true), true, 'LeftFirst: -Infinity is less than 0n');
+			st.equal(ES.IsLessThan($BigInt(0), -Infinity, false), false, '!LeftFirst: 0n is not less than -Infinity');
+			st.equal(ES.IsLessThan(-Infinity, $BigInt(0), false), true, '!LeftFirst: -Infinity is less than 0n');
+
+			st.end();
+		});
+
 		t.end();
 	});
 
@@ -8751,6 +12153,12 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 			);
 		});
 
+		t['throws'](
+			function () { ES.MakeMatchIndicesIndexPairArray('', [undefined], [undefined], true); },
+			TypeError,
+			'`indices` must contain exactly one more item than `groupNames`'
+		);
+
 		t.deepEqual(
 			ES.MakeMatchIndicesIndexPairArray(
 				'abc',
@@ -8795,6 +12203,12 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 			st.end();
 		});
 
+		t['throws'](
+			function () { ES.MakeMatchIndicesIndexPairArray('', [undefined, undefined], [''], false); },
+			TypeError,
+			'when `!hasGroups`, `groupNames` may only contain `undefined`'
+		);
+
 		t.end();
 	});
 
@@ -8814,6 +12228,18 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 				debug(nonString) + ' is not a string'
 			);
 		});
+
+		t.equal(
+			ES.RegExpHasFlag(RegExp.prototype, 'x'),
+			reProtoIsRegex ? false : undefined,
+			'RegExp.prototype yields ' + (reProtoIsRegex ? 'false' : 'undefined')
+		);
+
+		t['throws'](
+			function () { return ES.RegExpHasFlag({}, 'x'); },
+			TypeError,
+			'non-RegExp object throws TypeError'
+		);
 
 		var allFlags = new RegExp('a', supportedRegexFlags.join(''));
 		forEach(supportedRegexFlags, function (flag) {
@@ -8909,10 +12335,85 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 			'object is again sorted up to `len`'
 		);
 
+		t.equal(
+			ES.SortIndexedProperties(o, 6, function (a, b) {
+				return a - b;
+			}),
+			o,
+			'passed object is returned'
+		);
+		t.deepEqual(
+			o,
+			[0, 1, 2, 3],
+			'object is again sorted up to `len` when `len` is longer than than `o.length`'
+		);
+
+		t.end();
+	});
+
+	test('StringToBigInt', function (t) {
+		test('actual BigInts', { skip: !hasBigInts }, function (st) {
+			forEach(v.bigints, function (bigint) {
+				st.equal(
+					ES.StringToBigInt(String(bigint)),
+					bigint,
+					debug(String(bigint)) + ' becomes ' + debug(bigint)
+				);
+			});
+
+			forEach(v.integerNumbers, function (int) {
+				var bigint = safeBigInt(int);
+				st.equal(
+					ES.StringToBigInt(String(int)),
+					bigint,
+					debug(String(int)) + ' becomes ' + debug(bigint)
+				);
+			});
+
+			forEach(v.nonIntegerNumbers, function (nonInt) {
+				st.equal(
+					ES.StringToBigInt(String(nonInt)),
+					undefined,
+					debug(String(nonInt)) + ' becomes undefined'
+				);
+			});
+
+			st.equal(ES.StringToBigInt(''), BigInt(0), 'empty string becomes 0n');
+			st.equal(ES.StringToBigInt('Infinity'), undefined, 'non-finite numeric string becomes undefined');
+
+			st.end();
+		});
+
+		test('BigInt not supported', { skip: hasBigInts }, function (st) {
+			st['throws'](
+				function () { ES.StringToBigInt('0'); },
+				SyntaxError,
+				'throws a SyntaxError when BigInt is not available'
+			);
+
+			st.end();
+		});
+
+		forEach(v.nonStrings, function (nonString) {
+			t['throws'](
+				function () { ES.StringToBigInt(nonString); },
+				TypeError,
+				debug(nonString) + ' is not a string'
+			);
+		});
+
 		t.end();
 	});
 
 	test('StringToNumber', function (t) {
+		forEach(v.nonStrings, function (nonString) {
+			t['throws'](
+				function () { ES.StringToNumber(nonString); },
+				TypeError,
+				debug(nonString) + ' is not a String'
+			);
+		});
+
 		testStringToNumber(t, ES, ES.StringToNumber);
 
 		t.end();
@@ -8930,6 +12431,66 @@ var es2022 = function ES2022(ES, ops, expectedMissing, skips) {
 		t.equal(ES.ToZeroPaddedDecimalString(1, 1), '1');
 		t.equal(ES.ToZeroPaddedDecimalString(1, 2), '01');
 		t.equal(ES.ToZeroPaddedDecimalString(1, 3), '001');
+
+		t.end();
+	});
+
+	test('TypedArrayElementSize', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonTA) {
+			t['throws'](
+				function () { ES.TypedArrayElementSize(nonTA); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		forEach(availableTypedArrays, function (TA) {
+			var ta = new global[TA](0);
+			t.equal(ES.TypedArrayElementSize(ta), ta.BYTES_PER_ELEMENT, debug(TA) + ' (which should be a ' + TA + ') has correct element size');
+		});
+
+		t.end();
+	});
+
+	test('TypedArrayElementType', function (t) {
+		forEach(v.primitives.concat(v.objects), function (nonTA) {
+			t['throws'](
+				function () { ES.TypedArrayElementType(nonTA); },
+				TypeError,
+				debug(nonTA) + ' is not a TypedArray'
+			);
+		});
+
+		forEach(availableTypedArrays, function (TA) {
+			t.test(TA, function (st) {
+				var ta = new global[TA](0);
+				st.equal(
+					ES.TypedArrayElementType(ta),
+					TA.replace(/(?:lamped)?Array$/, ''),
+					debug(ta) + ' (which should be a ' + TA + ') has correct element type'
+				);
+
+				st.end();
+			});
+		});
+
+		t.end();
+	});
+
+	test('ValidateAndApplyPropertyDescriptor', function (t) {
+		t['throws'](
+			function () {
+				ES.ValidateAndApplyPropertyDescriptor(
+					{},
+					'property key',
+					true,
+					v.genericDescriptor(),
+					v.genericDescriptor()
+				);
+			},
+			TypeError,
+			'current must be a complete descriptor'
+		);
 
 		t.end();
 	});

@@ -31,7 +31,7 @@ async function getOps(year) {
 	let aOps;
 
 	if (year > 2021) {
-		aOps = $('[aoid],[type$="abstract operation"],[id^="sec-numeric-types-"]:not([aoid]):not([type="abstract operation"])', specHTML)
+		aOps = $('[aoid],[type$="abstract operation"],[id^="sec-numeric-types-"]:not([aoid]):not([type~="abstract operation"])', specHTML)
 			.not('[type="sdo"]');
 	} else {
 		aOps = root.filter('[aoid]')
@@ -44,14 +44,17 @@ async function getOps(year) {
 		}
 	}
 
+	aOps = aOps.not('[type~="host-defined"]');
+
 	const missings = [];
 
-	const entries = aOps.toArray().map((x) => {
+	let entries = aOps.toArray().map((x) => {
 		const op = $(x);
 		let aoid = op.attr('aoid');
 		let id = op.attr('id');
 
 		if (!id) {
+			// covers things like (in 2022/2023 DateFromTime(), WeekDay(), etc)
 			id = op.closest('[id]').attr('id');
 		}
 		// years other than 2016 have `id.startsWith('eqn-')`
@@ -106,6 +109,12 @@ async function getOps(year) {
 		throw `Missing URLs: ${missings}`;
 	}
 
+	entries.push([
+		'CompletionRecord', year < 2015
+			? 'https://262.ecma-international.org/5.1/#sec-8.9'
+			: `https://262.ecma-international.org/${edition}.0/#sec-completion-record-specification-type`,
+	]);
+
 	if (year === 2015) {
 		entries.push(
 			['abs', 'https://262.ecma-international.org/6.0/#sec-algorithm-conventions'],
@@ -146,6 +155,7 @@ async function getOps(year) {
 			['TimeWithinDay', 'https://262.ecma-international.org/6.0/#sec-day-number-and-time-within-day'],
 			['ToDateString', 'https://262.ecma-international.org/6.0/#sec-todatestring'],
 			['Type', 'https://262.ecma-international.org/6.0/#sec-ecmascript-data-types-and-values'],
+			['ValidateTypedArray', 'https://262.ecma-international.org/6.0/#sec-validatetypedarray'],
 			['WeekDay', 'https://262.ecma-international.org/6.0/#sec-week-day'],
 			['YearFromTime', 'https://262.ecma-international.org/6.0/#sec-year-number'],
 		);
@@ -163,6 +173,9 @@ async function getOps(year) {
 			['clamp', `https://262.ecma-international.org/${edition}.0/#clamping`],
 			['substring', `https://262.ecma-international.org/${edition}.0/#substring`],
 		);
+	}
+	if (year < 2022) {
+		entries = entries.filter(([ao]) => ao === 'HostEventSet' || !ao.startsWith('Host'));
 	}
 	entries.sort(([a], [b]) => a.localeCompare(b));
 
